@@ -1,0 +1,8 @@
+/.vscode
+/.embuild
+/target
+/Cargo.lock
+
+# Contient des secrets (Wi-Fi, clés ThingSpeak/Adafruit IO) — voir src/config.example.rs
+# pour le modèle à copier et remplir localement.
+/src/config.rs

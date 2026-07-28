@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Piscine — Domotique ESP32</title>
+  <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      background-color: #0b1120;
+      color: #c8d8e8;
+      font-family: Arial, sans-serif;
+      min-height: 100vh;
+    }
+
+    /* ── Enveloppe générale ──────────────────────────────────── */
+    .app-wrapper {
+      max-width: 1140px;
+      margin: 16px auto;
+      padding: 0 16px 24px;
+    }
+
+    .app-frame {
+      background: #0d1a2e;
+      border: 1px solid #1e3a5f;
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: 0 2px 32px rgba(0, 150, 255, 0.07);
+    }
+
+    /* ── En-tête (barre au-dessus du cadre) ─────────────────── */
+    .header-bar {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 4px 16px;
+    }
+
+    .header-title-row {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+      text-align: center;
+    }
+
+    .header-brand {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.6rem;
+      letter-spacing: 4px;
+      color: #2a5080;
+      text-transform: uppercase;
+    }
+
+    .header-title {
+      font-family: 'Orbitron', monospace;
+      font-size: 1.2rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      letter-spacing: 1px;
+    }
+
+    .header-badges-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .header-clock {
+      text-align: center;
+      min-width: 160px;
+      padding: 6px 18px;
+      border: 1px solid #1a3050;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+    }
+
+    .date {
+      font-size: 0.7rem;
+      color: #4a6888;
+      letter-spacing: 1px;
+      margin-bottom: 2px;
+    }
+
+    .time {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 1.7rem;
+      color: #00d4ff;
+      letter-spacing: 1px;
+    }
+
+    .time-source {
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 1px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      display: inline-block;
+      margin-top: 2px;
+    }
+    .time-source-gps  { background: #064e3b; color: #10b981; }
+    .time-source-ntp  { background: #0c2a4a; color: #38bdf8; }
+    .time-source-none { background: #4a1010; color: #ef4444; }
+
+    .blink {
+      animation: blink 1s step-end infinite;
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0;
+      }
+    }
+
+    /* ── Vignette GPS ────────────────────────────────────────── */
+    .gps-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid #1a3050;
+      border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .gps-badge.gps-ok   { border-color: #10b981; box-shadow: 0 0 10px rgba(16,185,129,0.2); }
+    .gps-badge.gps-weak { border-color: #f59e0b; box-shadow: 0 0 10px rgba(245,158,11,0.2); }
+    .gps-badge.gps-none { border-color: #ef4444; box-shadow: 0 0 10px rgba(239,68,68,0.15); }
+    .gps-sat-icon { width: 22px; height: 22px; flex-shrink: 0; }
+    .gps-info { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+    .gps-label {
+      font-size: 0.55rem; color: #4a6888;
+      text-transform: uppercase; letter-spacing: 1.5px; font-family: Arial, sans-serif;
+    }
+    .gps-value {
+      font-family: 'Orbitron', monospace; font-size: 0.82rem;
+      font-weight: 700; color: #4a6888; transition: color 0.4s;
+    }
+    /* ── Vignette Position ───────────────────────────────────── */
+    .position-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid #1a3050; border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      text-decoration: none; cursor: pointer;
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .position-badge.position-ok {
+      border-color: #38bdf8; box-shadow: 0 0 10px rgba(56,189,248,0.2);
+    }
+    .position-icon { width: 22px; height: 22px; flex-shrink: 0; color: #38bdf8; }
+    .position-info { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+    .position-label {
+      font-size: 0.55rem; color: #4a6888;
+      text-transform: uppercase; letter-spacing: 1.5px; font-family: Arial, sans-serif;
+    }
+    .position-value {
+      font-family: 'Orbitron', monospace; font-size: 0.75rem;
+      font-weight: 700; color: #38bdf8;
+    }
+    .position-badge:hover .position-value { text-decoration: underline; }
+
+    /* ── Vignette WiFi ────────────────────────────────────────── */
+    .wifi-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid #1a3050; border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .wifi-badge.wifi-ok   { border-color: #10b981; box-shadow: 0 0 10px rgba(16,185,129,0.2); }
+    .wifi-badge.wifi-weak { border-color: #f59e0b; box-shadow: 0 0 10px rgba(245,158,11,0.2); }
+    .wifi-badge.wifi-none { border-color: #ef4444; box-shadow: 0 0 10px rgba(239,68,68,0.15); }
+    .wifi-icon  { width: 22px; height: 22px; flex-shrink: 0; }
+    .wifi-info  { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+    .wifi-label {
+      font-size: 0.55rem; color: #4a6888;
+      text-transform: uppercase; letter-spacing: 1.5px; font-family: Arial, sans-serif;
+    }
+    .wifi-value {
+      font-family: 'Orbitron', monospace; font-size: 0.82rem;
+      font-weight: 700; color: #4a6888; transition: color 0.4s;
+    }
+
+    /* ── Vignette Batterie ────────────────────────────────────── */
+    .battery-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid #1a3050; border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .battery-badge.battery-ok   { border-color: #10b981; box-shadow: 0 0 10px rgba(16,185,129,0.2); }
+    .battery-badge.battery-weak { border-color: #f59e0b; box-shadow: 0 0 10px rgba(245,158,11,0.2); }
+    .battery-badge.battery-none { border-color: #ef4444; box-shadow: 0 0 10px rgba(239,68,68,0.15); }
+    .battery-icon  { width: 22px; height: 22px; flex-shrink: 0; }
+    .battery-info  { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+    .battery-label {
+      font-size: 0.55rem; color: #4a6888;
+      text-transform: uppercase; letter-spacing: 1.5px; font-family: Arial, sans-serif;
+    }
+    .battery-value {
+      font-family: 'Orbitron', monospace; font-size: 0.82rem;
+      font-weight: 700; color: #4a6888; transition: color 0.4s;
+    }
+    .battery-subvalue {
+      font-family: 'Orbitron', monospace; font-size: 0.6rem;
+      color: #4a6888;
+    }
+
+    /* ── Layout principal ────────────────────────────────────── */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 220px;
+      gap: 16px;
+    }
+
+    .main-area {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    /* ── Rangée de cartes ────────────────────────────────────── */
+    .cards-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 14px;
+    }
+
+    /* ── Carte générique ─────────────────────────────────────── */
+    .card {
+      background: #0f1824;
+      border: 1px solid #1a3050;
+      border-radius: 10px;
+      padding: 16px 18px;
+    }
+
+    .card-label {
+      display: block;
+      font-size: 0.62rem;
+      color: #4a6888;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 10px;
+    }
+
+    .card-value {
+      font-family: 'Orbitron', monospace;
+      font-size: 1.7rem;
+      font-weight: 700;
+      color: #e2e8f0;
+      line-height: 1;
+    }
+
+    .card-unit {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.85rem;
+      color: #4a6888;
+      margin-left: 2px;
+    }
+
+    /* ── Carte MODE ──────────────────────────────────────────── */
+    .card-mode {
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+
+    .card-mode .card-value {
+      transition: color 0.4s;
+      font-size: 1.8rem;
+    }
+
+    .card-mode.mode-auto {
+      border-color: #10b981;
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.2);
+    }
+
+    .card-mode.mode-manu {
+      border-color: #f59e0b;
+      box-shadow: 0 0 14px rgba(245, 158, 11, 0.2);
+    }
+
+    .card-mode.mode-off {
+      border-color: #1a3050;
+    }
+
+    /* ── Carte NIVEAU D'EAU ──────────────────────────────────── */
+    .card-level {
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+
+    .card-level .card-value {
+      font-size: 1.4rem;
+    }
+
+    /* ── Carte TEMPÉRATURE EAU ───────────────────────────────── */
+    .card-water .card-value {
+      color: #00d4ff;
+    }
+
+    .card-water .card-unit {
+      color: #0099bb;
+    }
+
+    /* ── Carte DÉFAUTS ───────────────────────────────────────── */
+    .card-faults {
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+
+    .card-faults.no-faults {
+      border-color: #10b981;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.15);
+    }
+
+    .card-faults.has-faults {
+      border-color: #ef4444;
+      box-shadow: 0 0 14px rgba(239, 68, 68, 0.25);
+    }
+
+    #noFaultMsg {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.75rem;
+      color: #10b981;
+      margin-top: 4px;
+      line-height: 1.5;
+    }
+
+    .fault-list {
+      list-style: none;
+      margin-top: 6px;
+    }
+
+    .fault-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(239, 68, 68, 0.12);
+      color: #f87171;
+      font-size: 0.78rem;
+      line-height: 1.4;
+    }
+
+    .fault-item:last-child {
+      border-bottom: none;
+    }
+
+    .fault-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      flex-shrink: 0;
+      margin-top: 4px;
+      box-shadow: 0 0 5px #ef4444;
+    }
+
+    /* ── Carte FILTRATION ────────────────────────────────────── */
+
+    .filtr-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+
+    .filtr-phase {
+      display: block;
+      font-size: 0.68rem;
+      color: #2a5080;
+      margin-top: 3px;
+      letter-spacing: 0.5px;
+    }
+
+    .filtr-remaining-wrap {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .filtr-remaining-label {
+      font-size: 0.62rem;
+      color: #f59e0b;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      opacity: 0.8;
+    }
+
+    .filtr-remaining {
+      font-family: 'Orbitron', monospace;
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #f59e0b;
+      white-space: nowrap;
+    }
+
+    .filtr-timeline {
+      position: relative;
+      height: 32px;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      overflow: visible;
+    }
+
+    .filtr-range {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      background: rgba(0, 100, 200, 0.15);
+      border-radius: 4px;
+      border: 1px solid rgba(0, 100, 200, 0.3);
+      transition: left 0.5s, width 0.5s;
+    }
+
+    .filtr-done {
+      position: absolute;
+      top: 5px;
+      bottom: 5px;
+      background: linear-gradient(90deg, #0055dd, #00aaff);
+      border-radius: 3px;
+      transition: width 0.8s ease;
+      min-width: 4px;
+    }
+
+    .filtr-cursor {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      background: #ffffff;
+      border-radius: 2px;
+      box-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
+      transition: left 0.5s;
+    }
+
+    .filtr-endline {
+      position: absolute;
+      top: -3px;
+      bottom: -3px;
+      width: 2px;
+      background: #10b981;
+      border-radius: 2px;
+      box-shadow: 0 0 6px #10b981;
+      transition: left 0.5s;
+    }
+
+    .filtr-endlabel {
+      position: absolute;
+      bottom: calc(100% + 4px);
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.55rem;
+      font-family: 'Orbitron', monospace;
+      color: #10b981;
+      white-space: nowrap;
+    }
+
+    .filtr-window-mark {
+      position: absolute;
+      top: -5px;
+      bottom: -5px;
+      width: 2px;
+      background: rgba(0, 140, 255, 0.7);
+      border-radius: 2px;
+      box-shadow: 0 0 6px rgba(0, 140, 255, 0.5);
+      transition: left 0.5s;
+    }
+
+    .filtr-window-label {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.52rem;
+      font-family: 'Orbitron', monospace;
+      color: rgba(0, 160, 255, 0.8);
+      white-space: nowrap;
+    }
+
+    .filtr-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.6rem;
+      color: #2a5080;
+      font-family: 'Orbitron', monospace;
+      margin-bottom: 10px;
+    }
+
+    .mode-seg {
+      position: absolute;
+      top: 4px;
+      bottom: 4px;
+      border-radius: 3px;
+      pointer-events: none;
+      opacity: 0.75;
+    }
+
+    .filtr-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      margin: 6px 0 2px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 0.72rem;
+      color: #94a3b8;
+    }
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      opacity: 0.85;
+      flex-shrink: 0;
+    }
+
+    .filtr-stats {
+      display: flex;
+      gap: 8px;
+    }
+
+    .filtr-stat {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+      padding: 8px 6px;
+      text-align: center;
+    }
+
+    .filtr-stat-label {
+      display: block;
+      font-size: 0.58rem;
+      color: #2a5080;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 4px;
+    }
+
+    .filtr-stat-value {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: #00aaff;
+    }
+
+    .filtr-stat-value.done {
+      color: #10b981;
+    }
+
+    .filtr-stat-value.reste {
+      color: #f59e0b;
+    }
+
+    /* ── Sidebar : Contrôle pompe ────────────────────────────── */
+
+    .card-pump {
+      height: 100%;
+    }
+
+    .pump-status-section {
+      margin: 12px 0 16px;
+      padding: 10px 12px;
+      background: rgba(255, 255, 255, 0.03);
+      border-radius: 6px;
+    }
+
+    .pump-status-label {
+      display: block;
+      font-size: 0.58rem;
+      color: #2a5080;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      margin-bottom: 6px;
+    }
+
+    .pump-indicator {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pump-dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #4a6888;
+      box-shadow: 0 0 6px #4a6888;
+      flex-shrink: 0;
+      transition: background 0.3s, box-shadow 0.3s;
+    }
+
+    .pump-dot.running {
+      background: #00ff88;
+      box-shadow: 0 0 8px #00ff88, 0 0 20px #00ff88, 0 0 40px rgba(0,255,136,0.4);
+      animation: pulse-dot 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% {
+        box-shadow: 0 0 8px #00ff88, 0 0 20px #00ff88, 0 0 40px rgba(0,255,136,0.4);
+        transform: scale(1);
+      }
+      50% {
+        box-shadow: 0 0 14px #00ff88, 0 0 35px #00ff88, 0 0 60px rgba(0,255,136,0.6);
+        transform: scale(1.25);
+      }
+    }
+
+    #pumpStatus {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: #4a6888;
+      transition: color 0.3s;
+    }
+
+    .pump-buttons {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .btn {
+      padding: 12px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      font-family: 'Orbitron', monospace;
+      font-weight: 700;
+      font-size: 0.85rem;
+      cursor: pointer;
+      letter-spacing: 1px;
+      transition: filter 0.15s, transform 0.1s;
+    }
+
+    .btn:hover {
+      filter: brightness(1.3);
+    }
+
+    .btn:active {
+      transform: scale(0.97);
+    }
+
+    .btn-on {
+      background: linear-gradient(135deg, #10b981, #84cc16);
+      color: #ffffff;
+      border-color: #10b981;
+      font-weight: 700;
+      text-shadow: 0 1px 2px rgba(0,0,0,0.4);
+    }
+
+    .btn-off {
+      background: rgba(239, 68, 68, 0.12);
+      color: #ef4444;
+      border-color: #ef4444;
+    }
+
+    .btn-reset {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+      border-color: #f59e0b;
+      margin-bottom: 10px;
+      font-size: 0.75rem;
+      padding: 10px;
+    }
+
+    .btn-boost {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+      border-color: #f59e0b;
+    }
+
+    .btn-stop-boost {
+      background: rgba(239, 68, 68, 0.08);
+      color: #ef4444;
+      border-color: #ef4444;
+      font-size: 0.78rem;
+    }
+
+    .boost-info {
+      text-align: center;
+      padding: 6px 0 2px;
+    }
+
+    .boost-countdown {
+      font-family: 'Orbitron', monospace;
+      font-size: 0.78rem;
+      color: #f59e0b;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── Section journaux ────────────────────────────────────── */
+    .logs-section {
+      margin-top: 16px;
+    }
+
+    .log-buttons {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin: 12px 0;
+    }
+
+    .btn-log {
+      padding: 9px 18px;
+      border: 1px solid #1a3050;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.04);
+      color: #c8d8e8;
+      font-family: 'Orbitron', monospace;
+      font-size: 0.72rem;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      transition: border-color 0.2s, background 0.2s;
+    }
+
+    .btn-log:hover {
+      border-color: #00d4ff;
+      color: #00d4ff;
+      background: rgba(0, 212, 255, 0.07);
+    }
+
+    .btn-log.active {
+      border-color: #00d4ff;
+      color: #00d4ff;
+      background: rgba(0, 212, 255, 0.1);
+    }
+
+    .btn-log-close {
+      border-color: #10b981;
+      color: #10b981;
+      margin-left: 12px;
+    }
+
+    .btn-log-close:hover {
+      border-color: #10b981;
+      color: #ffffff;
+      background: #34d399;
+    }
+
+    .btn-log-clear {
+      border-color: #502020;
+      color: #ff6666;
+      margin-left: auto;
+    }
+    .btn-log-clear:hover {
+      border-color: #ff4444;
+      color: #ff4444;
+      background: rgba(255, 68, 68, 0.12);
+    }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .modal-card {
+      background: #0f1e30;
+      border: 1px solid #503030;
+      border-radius: 12px;
+      padding: 28px 24px;
+      max-width: 320px;
+      width: 90%;
+      text-align: center;
+    }
+    .modal-title {
+      font-family: 'Orbitron', monospace;
+      color: #ff6666;
+      font-size: 1rem;
+      margin-bottom: 14px;
+      letter-spacing: 1px;
+    }
+    .modal-body {
+      color: #a0b8cc;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      margin-bottom: 24px;
+    }
+    .modal-buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }
+    .modal-btn {
+      padding: 10px 24px;
+      border-radius: 7px;
+      font-family: 'Orbitron', monospace;
+      font-size: 0.75rem;
+      cursor: pointer;
+      border: 1px solid;
+      transition: all 0.2s;
+    }
+    .modal-cancel {
+      background: transparent;
+      border-color: #1a3050;
+      color: #c8d8e8;
+    }
+    .modal-cancel:hover {
+      border-color: #00d4ff;
+      color: #00d4ff;
+    }
+    .modal-confirm {
+      background: rgba(255, 68, 68, 0.15);
+      border-color: #ff4444;
+      color: #ff6666;
+    }
+    .modal-confirm:hover {
+      background: rgba(255, 68, 68, 0.3);
+      color: #fff;
+    }
+
+    .schedule-section {
+      margin-top: 16px;
+    }
+    .schedule-row {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .schedule-field {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+    }
+    .schedule-label {
+      font-size: 0.72rem;
+      color: #6a8aaa;
+      letter-spacing: 0.5px;
+    }
+    .schedule-input-wrap {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(0,0,0,0.3);
+      border: 1px solid #1a3050;
+      border-radius: 8px;
+      padding: 6px 12px;
+    }
+    .schedule-btn {
+      background: none;
+      border: none;
+      color: #00d4ff;
+      font-size: 1.2rem;
+      cursor: pointer;
+      padding: 0 4px;
+      line-height: 1;
+    }
+    .schedule-btn:hover { color: #fff; }
+    .schedule-value {
+      font-family: 'Orbitron', monospace;
+      font-size: 1.1rem;
+      color: #e0f0ff;
+      width: 78px;
+      display: inline-block;
+      text-align: center;
+    }
+    .schedule-arrow {
+      font-size: 1.4rem;
+      color: #1a3050;
+      margin-top: 18px;
+    }
+    .btn-apply {
+      padding: 10px 22px;
+      border: 1px solid #00d4ff;
+      border-radius: 7px;
+      background: rgba(0, 212, 255, 0.08);
+      color: #00d4ff;
+      font-family: 'Orbitron', monospace;
+      font-size: 0.72rem;
+      cursor: pointer;
+      margin-top: 18px;
+      transition: all 0.2s;
+    }
+    .btn-apply:hover {
+      background: rgba(0, 212, 255, 0.2);
+      color: #fff;
+    }
+    .schedule-note {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: #6a8aaa;
+    }
+
+    .log-display {
+      margin-top: 12px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid #1a3050;
+      border-radius: 6px;
+      padding: 12px 14px;
+      font-family: monospace;
+      font-size: 0.72rem;
+      color: #7a9ab8;
+      white-space: pre;
+      overflow-x: auto;
+      max-height: 320px;
+      overflow-y: auto;
+      line-height: 1.6;
+    }
+
+    /* ── Responsive mobile portrait ─────────────────────────── */
+    @media (max-width: 640px) {
+
+      .app-wrapper {
+        margin: 8px auto;
+        padding: 0 8px 16px;
+      }
+
+      .app-frame {
+        padding: 12px;
+        border-radius: 10px;
+      }
+
+      .header-bar {
+        gap: 10px;
+        padding: 8px 4px 10px;
+      }
+
+      .header-clock {
+        min-width: unset;
+      }
+
+      .dashboard {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .cards-row {
+        grid-template-columns: repeat(2, 1fr);
+      }
+
+      .header-title {
+        font-size: 1rem;
+      }
+
+      .card-value {
+        font-size: 1.4rem;
+      }
+
+      .card-pump {
+        height: auto;
+      }
+
+      .pump-buttons {
+        flex-direction: row;
+      }
+
+      .pump-buttons .btn {
+        flex: 1;
+      }
+
+      .logs-section {
+        margin-top: 12px;
+      }
+
+      .log-display {
+        font-size: 0.65rem;
+      }
+    }
+
+    @media (max-width: 400px) {
+      .cards-row {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <div class="app-wrapper">
+
+    <!-- En-tête — juste au-dessus du cadre -->
+    <div class="header-bar">
+      <div class="header-title-row">
+        <span class="header-brand">Domotique ESP32</span>
+        <h1 class="header-title">Piscine — Tableau de bord</h1>
+      </div>
+
+      <div class="header-badges-row">
+        <!-- Vignette GPS -->
+        <div class="gps-badge gps-none" id="gpsBadge">
+          <svg class="gps-sat-icon" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="10.5" y="7" width="3" height="10" rx="1"/>
+            <rect x="2"    y="10.5" width="7" height="3" rx="1" opacity="0.75"/>
+            <rect x="15"   y="10.5" width="7" height="3" rx="1" opacity="0.75"/>
+            <line x1="12" y1="7" x2="12" y2="3.5" stroke="currentColor" stroke-width="1.5"/>
+            <circle cx="12" cy="2.5" r="1.5"/>
+          </svg>
+          <div class="gps-info">
+            <span class="gps-label">Satellite GPS</span>
+            <span class="gps-value" id="gpsValue">Recherche…</span>
+          </div>
+        </div>
+
+        <!-- Vignette Position -->
+        <a class="position-badge position-none" id="positionBadge" href="#" target="_blank" rel="noopener" style="display:none;">
+          <svg class="position-icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/>
+          </svg>
+          <div class="position-info">
+            <span class="position-label">Position</span>
+            <span class="position-value" id="positionValue"></span>
+          </div>
+        </a>
+
+        <!-- Vignette WiFi -->
+        <div class="wifi-badge wifi-none" id="wifiBadge">
+          <svg class="wifi-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-linecap="round">
+            <circle cx="12" cy="20.5" r="1.5" fill="currentColor" stroke="none"/>
+            <path d="M9.17 17.67 A4 4 0 0 1 14.83 17.67"  stroke-width="1.8"/>
+            <path d="M6.34 14.84 A8 8 0 0 1 17.66 14.84"  stroke-width="1.8"/>
+            <path d="M3.51 12.01 A12 12 0 0 1 20.49 12.01" stroke-width="1.8"/>
+          </svg>
+          <div class="wifi-info">
+            <span class="wifi-label">WiFi</span>
+            <span class="wifi-value" id="wifiValue">Hors ligne</span>
+          </div>
+        </div>
+
+        <!-- Vignette Batterie -->
+        <div class="battery-badge battery-none" id="batteryBadge">
+          <svg class="battery-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="1" y="7" width="19" height="10" rx="2" stroke-width="1.8"/>
+            <rect x="21" y="10" width="2" height="4" rx="1" fill="currentColor" stroke="none"/>
+          </svg>
+          <div class="battery-info">
+            <span class="battery-label">Batterie 12V</span>
+            <span class="battery-value" id="batteryValue">--</span>
+            <span class="battery-subvalue" id="batterySubValue"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-clock">
+        <div class="date"></div>
+        <div class="time"></div>
+        <div class="time-source time-source-none" id="timeSource">⚠ FALLBACK</div>
+      </div>
+    </div>
+
+    <!-- Cadre principal -->
+    <div class="app-frame">
+
+    <!-- Dashboard -->
+    <div class="dashboard">
+
+    <!-- Zone principale -->
+    <div class="main-area">
+
+      <!-- Ligne 1 : Niveau d'eau · Mode · Défauts -->
+      <div class="cards-row">
+
+        <div class="card card-level" id="cardLevel">
+          <span class="card-label">💧 Niveau d'eau</span>
+          <span id="waterLevelStatus" class="card-value">--</span>
+        </div>
+
+        <div class="card card-mode" id="cardMode">
+          <span class="card-label">⚙️ Mode de fonctionnement</span>
+          <span id="currentModeDisplay" class="card-value">--</span>
+        </div>
+
+        <div class="card card-faults no-faults" id="cardFaults">
+          <span class="card-label">Défauts Système</span>
+          <ul class="fault-list" id="faultList"></ul>
+          <div id="noFaultMsg">Aucun défaut<br>détecté</div>
+        </div>
+
+      </div>
+
+      <!-- Ligne 2 : Capteurs -->
+      <div class="cards-row">
+
+        <div class="card">
+          <span class="card-label">🌡️ Température Air</span>
+          <span id="temp" class="card-value">--</span><span class="card-unit">°C</span>
+        </div>
+
+        <div class="card">
+          <span class="card-label">💦 Humidité Air</span>
+          <span id="hum" class="card-value">--</span><span class="card-unit">%</span>
+        </div>
+
+        <div class="card card-water">
+          <span class="card-label">🌊 Température Eau</span>
+          <span id="tempWater" class="card-value">--</span><span class="card-unit">°C</span>
+        </div>
+
+      </div>
+
+      <!-- Ligne 3 : Filtration -->
+      <div class="card card-filtration" id="cardFiltration">
+        <div class="filtr-header">
+          <div>
+            <span class="card-label">⏳ Filtration automatique — Aujourd'hui</span>
+            <span class="filtr-phase">Phase d'optimisation active</span>
+          </div>
+          <div class="filtr-remaining-wrap">
+            <span class="filtr-remaining-label" id="filtRemainingLabel">⏱️ Temps restant</span>
+            <span class="filtr-remaining" id="filtStatReste">--</span>
+          </div>
+        </div>
+
+        <div class="filtr-timeline" id="filtTimeline">
+          <div class="filtr-range" id="filtRange"></div>
+          <div class="filtr-done" id="filtDone"></div>
+          <div class="filtr-cursor" id="filtCursor"></div>
+          <div class="filtr-endline" id="filtEnd">
+            <span class="filtr-endlabel" id="filtEndLabel"></span>
+          </div>
+          <div class="filtr-window-mark" id="filtWindowStart">
+            <span class="filtr-window-label" id="filtWindowStartLabel"></span>
+          </div>
+          <div class="filtr-window-mark" id="filtWindowEnd">
+            <span class="filtr-window-label" id="filtWindowEndLabel"></span>
+          </div>
+        </div>
+        <div class="filtr-labels">
+          <span id="filtLabelStart">--</span>
+          <span id="filtLabelMid">--</span>
+          <span id="filtLabelEnd">--</span>
+        </div>
+
+        <div class="filtr-legend">
+          <span class="legend-item"><span class="legend-dot" style="background:#3b82f6"></span>AUTO</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#10b981"></span>Manuel ON</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#f59e0b"></span>Manuel OFF</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#a855f7"></span>Boost ON</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Boost OFF</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#6b7280"></span>OFF</span>
+        </div>
+
+        <div class="filtr-stats">
+          <div class="filtr-stat">
+            <span class="filtr-stat-label">🎯 Objectif</span>
+            <span class="filtr-stat-value" id="filtStatObj">--</span>
+          </div>
+          <div class="filtr-stat">
+            <span class="filtr-stat-label">✅ Fait</span>
+            <span class="filtr-stat-value done" id="filtStatFait">--</span>
+          </div>
+          <div class="filtr-stat">
+            <span class="filtr-stat-label">🕐 Plage horaire</span>
+            <span class="filtr-stat-value" id="filtStatPlage" style="font-size:0.78rem;">--</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Sidebar : Contrôle pompe -->
+    <div class="sidebar">
+      <div class="card card-pump">
+        <span class="card-label">Contrôle Pompe</span>
+
+        <div class="pump-status-section">
+          <span class="pump-status-label">Statut pompe principale</span>
+          <div class="pump-indicator">
+            <span class="pump-dot" id="pumpDot"></span>
+            <span id="pumpStatus">--</span>
+          </div>
+        </div>
+
+        <div class="pump-status-section">
+          <span class="pump-status-label">Contact disjoncteur moteur</span>
+          <div class="pump-indicator">
+            <span class="pump-dot" id="motorFaultDot"></span>
+            <span id="motorFaultStatus">--</span>
+          </div>
+        </div>
+
+        <button id="btnResetMotor" class="btn btn-reset" onclick="resetMotorFault()" style="display:none;">
+          ↺ RÉARMER DÉFAUT MOTEUR
+        </button>
+
+        <!-- Boutons visibles en MODE MANUEL uniquement -->
+        <div class="pump-buttons" id="pumpButtons" style="display:none;">
+          <button class="btn btn-on" onclick="controlPump('on')">MARCHE</button>
+          <button class="btn btn-off" onclick="controlPump('off')">ARRÊT</button>
+        </div>
+
+        <!-- Boutons visibles en MODE AUTO uniquement -->
+        <div class="pump-buttons" id="boostButtons" style="display:none;">
+          <button class="btn btn-boost" id="btnBoostAction" onclick="boostPump()">⚡ Marche forcée 1h00</button>
+          <button class="btn btn-stop-boost" id="btnStopBoost" onclick="stopBoost()" style="display:none;">✕ Annuler</button>
+          <div class="boost-info" id="boostInfo" style="display:none;">
+            <span class="boost-countdown" id="boostCountdown"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Section plage de filtration -->
+  <div class="schedule-section">
+    <div class="card">
+      <span class="card-label">Plage de filtration — Mode standard</span>
+      <div class="schedule-row">
+        <div class="schedule-field">
+          <span class="schedule-label">DÉBUT</span>
+          <div class="schedule-input-wrap">
+            <button class="schedule-btn" onclick="adjustHour('start', -0.5)">−</button>
+            <span class="schedule-value" id="schedStart">8h</span>
+            <button class="schedule-btn" onclick="adjustHour('start', +0.5)">+</button>
+          </div>
+        </div>
+        <div class="schedule-arrow">→</div>
+        <div class="schedule-field">
+          <span class="schedule-label">FIN</span>
+          <div class="schedule-input-wrap">
+            <button class="schedule-btn" onclick="adjustHour('end', -0.5)">−</button>
+            <span class="schedule-value" id="schedEnd">20h</span>
+            <button class="schedule-btn" onclick="adjustHour('end', +0.5)">+</button>
+          </div>
+        </div>
+        <button class="btn-apply" onclick="saveSchedule()">Appliquer</button>
+      </div>
+      <div class="schedule-note" id="schedNote">Chargement...</div>
+    </div>
+  </div>
+
+  <!-- Section durée marche / arrêt forcé -->
+  <div class="schedule-section" id="boostDurSection">
+    <div class="card">
+      <span class="card-label">Durée marche / arrêt forcé</span>
+      <div class="schedule-row">
+        <div class="schedule-field">
+          <span class="schedule-label">DURÉE</span>
+          <div class="schedule-input-wrap">
+            <button class="schedule-btn" onclick="adjustBoostDuration(-30)">−</button>
+            <span class="schedule-value" id="boostDurValue">1h00</span>
+            <button class="schedule-btn" onclick="adjustBoostDuration(+30)">+</button>
+          </div>
+        </div>
+        <button class="btn-apply" onclick="saveBoostDuration()">Appliquer</button>
+      </div>
+      <div class="schedule-note" id="boostDurNote">Chargement...</div>
+    </div>
+  </div>
+
+  <!-- Section journaux -->
+  <div class="logs-section">
+    <div class="card">
+      <span class="card-label">Journaux système — mois en cours</span>
+      <div class="log-buttons">
+        <button class="btn-log" id="btnLogSessions" onclick="showLog('sessions')">Sessions Pompe</button>
+        <button class="btn-log" id="btnLogDaily" onclick="showLog('daily')">Bilans Journaliers</button>
+        <button class="btn-log" id="btnLogAlertes" onclick="showLog('alertes')">Alertes</button>
+        <button class="btn-log btn-log-close" id="btnLogClose" onclick="closeLog()" style="display:none">✕ Fermer</button>
+        <button class="btn-log btn-log-clear" onclick="openClearModal()">Effacer les journaux</button>
+      </div>
+      <pre id="logDisplay" class="log-display">Sélectionnez un journal ci-dessus.</pre>
+    </div>
+  </div>
+
+  <!-- Modal confirmation effacement journaux -->
+  <div id="clearModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeClearModal()">
+    <div class="modal-card">
+      <div class="modal-title">Effacer les journaux ?</div>
+      <div class="modal-body">
+        Cette action supprime définitivement :<br>
+        sessions, bilans journaliers, alertes<br>et journal système du mois en cours.
+      </div>
+      <div class="modal-buttons">
+        <button class="modal-btn modal-cancel" onclick="closeClearModal()">Annuler</button>
+        <button class="modal-btn modal-confirm" onclick="confirmClearLogs()">Effacer</button>
+      </div>
+    </div>
+  </div>
+
+    </div><!-- /app-frame -->
+  </div><!-- /app-wrapper -->
+
+  <script src="/script.js?v=3"></script>
+</body>
+
+</html>

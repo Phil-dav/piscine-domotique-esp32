@@ -1,0 +1,47 @@
+[package]
+name = "pcf8574"
+version = "0.1.0"
+authors = ["Phil-dav <flophil34@yahoo.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "pcf8574"
+harness = false # do not use the built-in cargo test harness -> resolve rust-analyzer errors
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true    # Symbols are nice, and they don't increase the size on Flash
+opt-level = "z"
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf-sys.git" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf-hal.git" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf-svc.git" }
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = { version = "0.52.1", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+embedded-svc = "0.29"
+# Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
+embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+pcf857x = "0.5.0"
+anyhow = "1.0.104"
+ssd1306 = "0.10.0"
+embedded-graphics = "0.8.2"
+embedded-hal-bus = "0.3.0"
+heapless = "0.9.3"
+one-wire-bus = "0.1.1"
+ds18b20 = "0.1.1"
+embedded-hal = "0.2"
+nmea0183 = "0.6"
+chrono = "0.4.45"
+# Verrous sans empoisonnement : évite qu'un panic isolé n'importe où (ex. une route
+# web) ne rende tous les .lock() suivants fatals partout dans le programme, y
+# compris dans la boucle de pilotage pompe. Voir memory "corrections en suspens".
+parking_lot = "0.12"
+
+[build-dependencies]
+embuild = "0.33"
