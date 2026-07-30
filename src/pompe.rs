@@ -104,8 +104,7 @@ impl GestionPompe {
 
     /// `true` si la pompe est actuellement bloquée suite à un claquement détecté.
     pub fn bloquee(&self) -> bool {
-        self.bloquee_jusqua
-            .is_some_and(|fin| Instant::now() < fin)
+        self.bloquee_jusqua.is_some_and(|fin| Instant::now() < fin)
     }
 
     /// Temps de marche cumulé depuis la création (à remettre à zéro chaque jour par l'appelant).

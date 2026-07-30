@@ -16,13 +16,11 @@ mod pompe;
 mod securite;
 mod stockage;
 mod temps;
-mod thingspeak;
 mod web_server;
 mod wifi;
 
-use core::cell::RefCell;
-use std::time::{Duration, Instant};
 use chrono::{Datelike, Timelike};
+use core::cell::RefCell;
 use embedded_hal_bus::i2c::RefCellDevice;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::adc::oneshot::{
@@ -44,6 +42,7 @@ use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use log::{info, warn};
 use one_wire_bus::OneWire;
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
+use std::time::{Duration, Instant};
 
 const CLE_BOOST_MIN: &str = "boost_min";
 const CLE_DERNIER_HORODATAGE: &str = "dernier_ts";
@@ -208,7 +207,8 @@ fn main() -> anyhow::Result<()> {
         ip_texte = ip_info.ip.to_string();
 
         if ecran_disponible {
-            if let Err(e) = ecran::afficher_connecte(&mut display, &ip_texte, w.wifi().get_rssi().ok())
+            if let Err(e) =
+                ecran::afficher_connecte(&mut display, &ip_texte, w.wifi().get_rssi().ok())
             {
                 warn!("Écran OLED : erreur d'affichage (ignorée) : {:?}", e);
             } else if let Err(e) = display.flush() {
@@ -258,11 +258,11 @@ fn main() -> anyhow::Result<()> {
     let mut session_debut: Option<(String, Instant)> = None;
     let mut pompe_precedent = false;
     // Détecte un changement d'état pompe pendant le bloc journal (verrouillé) ;
-    // consommé juste après, une fois le verrou relâché, pour envoyer vers ThingSpeak
+    // consommé juste après, une fois le verrou relâché, pour envoyer vers Adafruit IO
     // sans jamais bloquer le journal pendant l'appel réseau.
     let mut pompe_transition: Option<bool> = None;
     // Même principe que `pompe_transition`, pour le mode (AUTO/MANU/OFF) : détecté
-    // près de `historique_modes`, consommé plus loin vers ThingSpeak une fois le
+    // près de `historique_modes`, consommé plus loin vers Adafruit IO une fois le
     // Wi-Fi connu.
     let mut mode_transition: Option<etat_partage::Mode> = None;
     let mut niveau_ok_precedent = true;
@@ -284,7 +284,18 @@ fn main() -> anyhow::Result<()> {
     let mut historique = historique_modes::HistoriqueModes::nouveau();
     let mut historique_initialise = false;
     let mut dernier_mode_physique = etat_partage::Mode::Off;
-    let mut boost_actif_precedent = false;
+    // Dernier type de segment de timeline ouvert (0=OFF, 1=AUTO, 2=MANU_ON, 3=MANU_OFF,
+    // 4=BOOST_ON, 5=BOOST_OFF) — sert à détecter tout changement (mode, marche/arrêt en
+    // Manuel, ou Boost) qui doit fermer le segment en cours et en ouvrir un nouveau.
+    let mut dernier_type_segment: Option<u8> = None;
+
+    // Second historique, séparé du premier : la marche RÉELLE de la pompe (0=arrêtée,
+    // 1=en marche), indépendamment du mode sélectionné — sert à tracer un trait fidèle
+    // sur le dashboard plutôt que le bloc synthétique "Fait" actuel, toujours ancré à
+    // l'heure de début de plage (voir l'échange du 29/07/2026 : un boost ayant tourné
+    // cette nuit-là apparaissait à tort comme si la pompe avait tourné dès 8h00).
+    let mut historique_pompe = historique_modes::HistoriqueModes::nouveau();
+    let mut dernier_etat_pompe_segment: Option<u8> = None;
 
     // Écran OLED : 5 pages, bouton P4 pour naviguer.
     // 0=capteurs, 1=Wi-Fi, 2=pompe/filtration, 3=sécurités/uptime, 4=bilan journalier.
@@ -325,33 +336,27 @@ fn main() -> anyhow::Result<()> {
     const INTERVALLE_WIFI: Duration = Duration::from_secs(30);
     let mut dernier_controle_wifi = Instant::now();
 
-    // Envoi périodique des mesures vers ThingSpeak (cloud gratuit) : toutes les 5
-    // minutes suffit largement (l'eau/l'air ne varient pas vite), et reste très en
-    // dessous de la limite gratuite (une mise à jour toutes les 15 s minimum).
-    const INTERVALLE_THINGSPEAK: Duration = Duration::from_secs(300);
-    let mut dernier_envoi_thingspeak = Instant::now();
+    // Envoi périodique des mesures vers Adafruit IO (cloud gratuit) : toutes les 5
+    // minutes suffit largement (l'eau/l'air ne varient pas vite).
+    const INTERVALLE_ENVOI_CLOUD: Duration = Duration::from_secs(300);
+    let mut dernier_envoi_periodique = Instant::now();
 
-    // Envois événementiels (pompe/mode) : ThingSpeak rejette silencieusement toute
-    // mise à jour arrivant moins de 15 s après la précédente sur le même canal (HTTP
-    // 200 quand même renvoyé, mais rien n'est enregistré). Marge de 16 s pour rester
-    // au-dessus de cette limite avec un peu de sécurité. Si un changement survient
-    // trop tôt, il n'est pas perdu : il reste en attente (`pompe_transition`/
-    // `mode_transition` non consommés) et part dès que le délai est écoulé, avec la
-    // valeur la plus récente.
+    // Envois événementiels (pompe/mode) : marge de 16 s entre deux envois pour rester
+    // raisonnable côté réseau. Si un changement survient trop tôt, il n'est pas perdu :
+    // il reste en attente (`pompe_transition`/`mode_transition` non consommés) et part
+    // dès que le délai est écoulé, avec la valeur la plus récente.
     const DELAI_MIN_EVENEMENT: Duration = Duration::from_secs(16);
     let mut dernier_envoi_evenement = Instant::now() - DELAI_MIN_EVENEMENT;
 
-    // Fil d'envoi ThingSpeak dédié : la boucle principale ne fait qu'y déposer des
+    // Fil d'envoi Adafruit IO dédié : la boucle principale ne fait qu'y déposer des
     // mesures (opération instantanée), elle ne fait jamais l'appel réseau elle-même.
-    // Voir l'explication détaillée en tête de `thingspeak.rs` — un appel HTTPS peut
+    // Voir l'explication détaillée en tête de `adafruit_io.rs` — un appel HTTPS peut
     // bloquer bien au-delà du délai configuré sur un Wi-Fi qui perd des paquets, ce
     // qui déclenchait le Task Watchdog et redémarrait la carte.
-    let expediteur_thingspeak = thingspeak::Expediteur::demarrer(config::THINGSPEAK_WRITE_API_KEY)?;
-    // Adafruit IO tourne en parallèle de ThingSpeak (même principe de fil dédié,
-    // voir adafruit_io.rs), le temps de comparer les deux rendus.
     let expediteur_adafruit = adafruit_io::Expediteur::demarrer(
         config::ADAFRUIT_IO_USERNAME,
         config::ADAFRUIT_IO_KEY,
+        config::ADAFRUIT_IO_GROUP_KEY,
     )?;
 
     // Task Watchdog : si la boucle principale ne "nourrit" plus le chien de garde
@@ -373,7 +378,10 @@ fn main() -> anyhow::Result<()> {
                     derniere_temperature_air = Some(t);
                     derniere_humidite = Some(h);
                 }
-                Err(e) => warn!("AHT10 : lecture échouée, dernière valeur conservée : {:?}", e),
+                Err(e) => warn!(
+                    "AHT10 : lecture échouée, dernière valeur conservée : {:?}",
+                    e
+                ),
             }
         }
 
@@ -383,7 +391,10 @@ fn main() -> anyhow::Result<()> {
         let mode_physique = match pcf8574::lire_mode(&i2c_partage) {
             Ok(m) => m,
             Err(e) => {
-                warn!("PCF8574 : lecture mode échouée, mode précédent conservé : {:?}", e);
+                warn!(
+                    "PCF8574 : lecture mode échouée, mode précédent conservé : {:?}",
+                    e
+                );
                 etat.lock().mode.clone()
             }
         };
@@ -441,7 +452,8 @@ fn main() -> anyhow::Result<()> {
         bouton_precedent = bouton_actif;
 
         // Retour automatique à la page 0 après 30 s d'inactivité sur une autre page.
-        if page_ecran != 0 && maintenant.duration_since(dernier_changement_page) >= RETOUR_AUTO_APRES
+        if page_ecran != 0
+            && maintenant.duration_since(dernier_changement_page) >= RETOUR_AUTO_APRES
         {
             page_ecran = 0;
         }
@@ -532,7 +544,11 @@ fn main() -> anyhow::Result<()> {
                 boost.demarrer(pompe.etat());
                 info!(
                     "Marche forcée demandée ({}, {} min)",
-                    if boost.marche_forcee() { "MARCHE" } else { "ARRET" },
+                    if boost.marche_forcee() {
+                        "MARCHE"
+                    } else {
+                        "ARRET"
+                    },
                     boost.duree_minutes()
                 );
             }
@@ -580,8 +596,12 @@ fn main() -> anyhow::Result<()> {
                 temp_min_jour = None;
                 temp_max_jour = None;
                 historique.reinitialiser();
+                historique_pompe.reinitialiser();
                 historique_initialise = false;
-                info!("Nouveau jour ({}) : compteur de filtration remis à zéro", jour);
+                info!(
+                    "Nouveau jour ({}) : compteur de filtration remis à zéro",
+                    jour
+                );
             }
             dernier_jour = Some(jour);
             dernier_jour_texte = date_texte.clone();
@@ -600,13 +620,43 @@ fn main() -> anyhow::Result<()> {
 
         // Historique des modes pour la timeline du dashboard : un segment n'est ouvert
         // que si l'heure locale est fiable (comme le C++, qui exige getDecimalHour() >= 0).
-        let type_segment_mode = |mode: &etat_partage::Mode| -> u8 {
-            match mode {
-                etat_partage::Mode::Auto => 1,
-                etat_partage::Mode::Manuel => 3,
-                etat_partage::Mode::Off => 0,
+        // Type de segment calculé à partir de trois informations combinées (mode, pompe,
+        // boost), pour que les 6 couleurs de la légende (OFF, AUTO, MANU ON/OFF,
+        // BOOST ON/OFF) correspondent vraiment à quelque chose — avant ce correctif,
+        // Manuel restait toujours codé "MANU OFF" et le Boost n'avait jamais sa propre
+        // couleur (voir [[projet-ambiguite-date-session-minuit]] et l'échange du
+        // 29/07/2026 sur le mélange manuel/pompe dans la timeline).
+        let type_segment_actuel = |mode: &etat_partage::Mode,
+                                   pompe_on: bool,
+                                   boost_actif: bool,
+                                   boost_marche_forcee: bool|
+         -> u8 {
+            if boost_actif {
+                if boost_marche_forcee {
+                    4
+                } else {
+                    5
+                } // BOOST ON / BOOST OFF
+            } else {
+                match mode {
+                    etat_partage::Mode::Auto => 1,
+                    etat_partage::Mode::Manuel => {
+                        if pompe_on {
+                            2 // MANU ON
+                        } else {
+                            3 // MANU OFF
+                        }
+                    }
+                    etat_partage::Mode::Off => 0,
+                }
             }
         };
+        let type_actuel = type_segment_actuel(
+            &mode_physique,
+            pompe.etat(),
+            boost.actif(),
+            boost.marche_forcee(),
+        );
         if mode_physique != dernier_mode_physique {
             mode_transition = Some(mode_physique.clone());
         }
@@ -618,24 +668,44 @@ fn main() -> anyhow::Result<()> {
                 // d'optimisation active" était jusqu'ici perdue à chaque reset).
                 let segments_recharges = journal.lock().charger_timeline(date_du_jour);
                 if segments_recharges.is_empty() {
-                    historique.demarrer(type_segment_mode(&mode_physique), heure_decimale);
+                    historique.demarrer(type_actuel, heure_decimale);
+                    dernier_type_segment = Some(type_actuel);
                 } else {
                     let nb_segments = segments_recharges.len();
-                    // Réaligne le suivi du mode avec le dernier segment rechargé,
-                    // pour ne pas ouvrir un doublon si le mode n'a pas changé depuis
-                    // le redémarrage.
+                    // Réaligne le suivi du type de segment avec le dernier segment
+                    // rechargé, pour ne pas ouvrir un doublon si rien n'a changé depuis
+                    // le redémarrage (`dernier_mode_physique`, lui, est de toute façon
+                    // réécrit à chaque tour de boucle avec le mode réel du moment, plus
+                    // bas — inutile de le réaligner ici).
                     if let Some(dernier) = segments_recharges.last() {
-                        dernier_mode_physique = match dernier.type_segment {
-                            1 => etat_partage::Mode::Auto,
-                            3 => etat_partage::Mode::Manuel,
-                            _ => etat_partage::Mode::Off,
-                        };
+                        dernier_type_segment = Some(dernier.type_segment);
                     }
-                    historique = historique_modes::HistoriqueModes::depuis_segments(segments_recharges);
+                    historique =
+                        historique_modes::HistoriqueModes::depuis_segments(segments_recharges);
                     info!("Timeline du jour rechargée depuis la NVS ({nb_segments} segment(s))");
                 }
                 historique_initialise = true;
-                journal.lock().sauvegarder_timeline(date_du_jour, historique.segments());
+                journal
+                    .lock()
+                    .sauvegarder_timeline(date_du_jour, historique.segments());
+
+                // Même principe pour le second historique (marche réelle de la pompe).
+                let etat_pompe_actuel = u8::from(pompe.etat());
+                let segments_pompe_recharges = journal.lock().charger_timeline_pompe(date_du_jour);
+                if segments_pompe_recharges.is_empty() {
+                    historique_pompe.demarrer(etat_pompe_actuel, heure_decimale);
+                    dernier_etat_pompe_segment = Some(etat_pompe_actuel);
+                } else {
+                    if let Some(dernier) = segments_pompe_recharges.last() {
+                        dernier_etat_pompe_segment = Some(dernier.type_segment);
+                    }
+                    historique_pompe = historique_modes::HistoriqueModes::depuis_segments(
+                        segments_pompe_recharges,
+                    );
+                }
+                journal
+                    .lock()
+                    .sauvegarder_timeline_pompe(date_du_jour, historique_pompe.segments());
 
                 // Même principe pour le temps de marche / nombre de sessions du jour
                 // (voir pompe.rs) : sans ça, ces compteurs repartaient de zéro à
@@ -647,17 +717,29 @@ fn main() -> anyhow::Result<()> {
                     info!("Compteurs pompe du jour rechargés depuis la NVS ({heures:.2}h, {sessions} session(s))");
                 }
             }
-            if mode_physique != dernier_mode_physique {
-                historique.demarrer(type_segment_mode(&mode_physique), heure_decimale);
-                journal.lock().sauvegarder_timeline(date_du_jour, historique.segments());
+            // Un seul déclencheur pour toute la timeline : dès que le type de segment
+            // calculé plus haut change (mode, marche/arrêt en Manuel, ou début/fin de
+            // Boost), on ferme le segment en cours et on en ouvre un nouveau.
+            if dernier_type_segment != Some(type_actuel) {
+                historique.demarrer(type_actuel, heure_decimale);
+                journal
+                    .lock()
+                    .sauvegarder_timeline(date_du_jour, historique.segments());
+                dernier_type_segment = Some(type_actuel);
             }
-            if boost_actif_precedent && !boost.actif() {
-                historique.demarrer(1, heure_decimale);
-                journal.lock().sauvegarder_timeline(date_du_jour, historique.segments());
+
+            // Second déclencheur, indépendant du premier : la marche réelle de la
+            // pompe, pour le tracé bleu clair du dashboard.
+            let etat_pompe_actuel = u8::from(pompe.etat());
+            if dernier_etat_pompe_segment != Some(etat_pompe_actuel) {
+                historique_pompe.demarrer(etat_pompe_actuel, heure_decimale);
+                journal
+                    .lock()
+                    .sauvegarder_timeline_pompe(date_du_jour, historique_pompe.segments());
+                dernier_etat_pompe_segment = Some(etat_pompe_actuel);
             }
         }
         dernier_mode_physique = mode_physique.clone();
-        boost_actif_precedent = boost.actif();
 
         let mode_texte = match &mode_physique {
             etat_partage::Mode::Auto => "AUTO",
@@ -798,36 +880,34 @@ fn main() -> anyhow::Result<()> {
             canicule_precedent = filtration_auto.canicule_actif();
         }
 
-        let wifi_connecte = wifi.as_ref().is_some_and(|w| w.is_connected().unwrap_or(false));
+        let wifi_connecte = wifi
+            .as_ref()
+            .is_some_and(|w| w.is_connected().unwrap_or(false));
         let wifi_rssi = wifi.as_ref().and_then(|w| w.wifi().get_rssi().ok());
 
-        if wifi_connecte && maintenant.duration_since(dernier_envoi_thingspeak) >= INTERVALLE_THINGSPEAK
+        if wifi_connecte
+            && maintenant.duration_since(dernier_envoi_periodique) >= INTERVALLE_ENVOI_CLOUD
         {
-            dernier_envoi_thingspeak = maintenant;
-            expediteur_thingspeak.envoyer(thingspeak::Mesures {
-                temp_eau: derniere_temperature_eau,
-                temp_air: derniere_temperature_air,
-                humidite: derniere_humidite,
-                ..Default::default()
-            });
-            expediteur_adafruit.envoyer(adafruit_io::Mesures {
-                temp_eau: derniere_temperature_eau,
-                temp_air: derniere_temperature_air,
-                humidite: derniere_humidite,
-                batterie: tension_batterie,
-                sortie_5v: tension_sortie_5v,
-                ..Default::default()
-            });
+            dernier_envoi_periodique = maintenant;
+            if config::ADAFRUIT_IO_ACTIF {
+                expediteur_adafruit.envoyer(adafruit_io::Mesures {
+                    temp_eau: derniere_temperature_eau,
+                    temp_air: derniere_temperature_air,
+                    humidite: derniere_humidite,
+                    batterie: tension_batterie,
+                    sortie_5v: tension_sortie_5v,
+                    ..Default::default()
+                });
+            }
         }
 
-        // État pompe (Field 4) et mode (Field 5) vers ThingSpeak : uniquement à chaque
-        // changement (pas toutes les 5 min comme les températures), pour un signal en
-        // créneaux net — mais jamais plus vite que `DELAI_MIN_EVENEMENT`, sinon
-        // ThingSpeak rejetterait silencieusement l'envoi le plus rapproché des deux.
-        // Si le Wi-Fi est indisponible, ou que le délai minimum n'est pas encore
-        // écoulé, l'événement reste simplement en attente (`.take()` non consommé) et
-        // partira dès que les deux conditions seront réunies, avec la valeur la plus
-        // récente si l'état a changé plusieurs fois entre-temps.
+        // État pompe et mode vers Adafruit IO : uniquement à chaque changement (pas
+        // toutes les 5 min comme les températures), pour un signal en créneaux net —
+        // mais jamais plus vite que `DELAI_MIN_EVENEMENT`. Si le Wi-Fi est
+        // indisponible, ou que le délai minimum n'est pas encore écoulé, l'événement
+        // reste simplement en attente (`.take()` non consommé) et partira dès que les
+        // deux conditions seront réunies, avec la valeur la plus récente si l'état a
+        // changé plusieurs fois entre-temps.
         if wifi_connecte
             && (pompe_transition.is_some() || mode_transition.is_some())
             && maintenant.duration_since(dernier_envoi_evenement) >= DELAI_MIN_EVENEMENT
@@ -839,16 +919,13 @@ fn main() -> anyhow::Result<()> {
                 etat_partage::Mode::Auto => 2,
             });
             dernier_envoi_evenement = maintenant;
-            expediteur_thingspeak.envoyer(thingspeak::Mesures {
-                pompe: nouvel_etat_pompe,
-                mode: nouveau_mode,
-                ..Default::default()
-            });
-            expediteur_adafruit.envoyer(adafruit_io::Mesures {
-                pompe: nouvel_etat_pompe,
-                mode: nouveau_mode,
-                ..Default::default()
-            });
+            if config::ADAFRUIT_IO_ACTIF {
+                expediteur_adafruit.envoyer(adafruit_io::Mesures {
+                    pompe: nouvel_etat_pompe,
+                    mode: nouveau_mode,
+                    ..Default::default()
+                });
+            }
         }
 
         // Reconnexion Wi-Fi automatique si la connexion a été perdue (coupure routeur,
@@ -874,113 +951,114 @@ fn main() -> anyhow::Result<()> {
         let alerte_active = !niveau_ok || securite_moteur.actif() || !systeme_sur;
 
         if ecran_disponible {
-        let resultat_ecran: anyhow::Result<()> = (|| {
+            let resultat_ecran: anyhow::Result<()> = (|| {
+                // Une alerte réveille toujours l'écran, quelle que soit la cause de la mise en veille.
+                if alerte_active {
+                    ecran_en_veille = false;
+                    derniere_activite = maintenant;
+                } else if !ecran_en_veille && derniere_activite.elapsed() >= VEILLE_APRES {
+                    ecran_en_veille = true;
+                }
 
-        // Une alerte réveille toujours l'écran, quelle que soit la cause de la mise en veille.
-        if alerte_active {
-            ecran_en_veille = false;
-            derniere_activite = maintenant;
-        } else if !ecran_en_veille && derniere_activite.elapsed() >= VEILLE_APRES {
-            ecran_en_veille = true;
-        }
+                // Commande physique allumage/extinction : envoyée sur tout changement d'état de
+                // veille, quelle qu'en soit la cause (alerte, ou réveil par appui bouton détecté
+                // plus haut) — auparavant seule l'alerte envoyait cette commande, donc un réveil
+                // par bouton redessinait le contenu en mémoire sans jamais rallumer l'écran.
+                if ecran_en_veille != veille_precedente {
+                    display
+                        .set_display_on(!ecran_en_veille)
+                        .map_err(|e| anyhow::anyhow!("Erreur alimentation écran : {:?}", e))?;
+                }
 
-        // Commande physique allumage/extinction : envoyée sur tout changement d'état de
-        // veille, quelle qu'en soit la cause (alerte, ou réveil par appui bouton détecté
-        // plus haut) — auparavant seule l'alerte envoyait cette commande, donc un réveil
-        // par bouton redessinait le contenu en mémoire sans jamais rallumer l'écran.
-        if ecran_en_veille != veille_precedente {
-            display
-                .set_display_on(!ecran_en_veille)
-                .map_err(|e| anyhow::anyhow!("Erreur alimentation écran : {:?}", e))?;
-        }
+                let clignotement_a_change = alerte_active
+                    && dernier_clignotement.elapsed() >= Duration::from_millis(600)
+                    && {
+                        dernier_clignotement = maintenant;
+                        alerte_visible = !alerte_visible;
+                        true
+                    };
 
-        let clignotement_a_change = alerte_active
-            && dernier_clignotement.elapsed() >= Duration::from_millis(600)
-            && {
-                dernier_clignotement = maintenant;
-                alerte_visible = !alerte_visible;
-                true
-            };
+                let besoin_redessiner = page_ecran != page_ecran_precedente
+                    || alerte_active != alerte_precedente
+                    || ecran_en_veille != veille_precedente
+                    || clignotement_a_change
+                    || (!alerte_active
+                        && !ecran_en_veille
+                        && dernier_dessin.elapsed() >= INTERVALLE_DESSIN);
 
-        let besoin_redessiner = page_ecran != page_ecran_precedente
-            || alerte_active != alerte_precedente
-            || ecran_en_veille != veille_precedente
-            || clignotement_a_change
-            || (!alerte_active && !ecran_en_veille && dernier_dessin.elapsed() >= INTERVALLE_DESSIN);
-
-        if besoin_redessiner && !ecran_en_veille {
-            if alerte_active {
-                if alerte_visible {
-                    let cause_niveau = if !niveau_ok { "Niveau: MANQUE !" } else { "" };
-                    let cause_moteur = if securite_moteur.actif() {
-                        if securite_moteur.verrouille() {
-                            "Moteur: VERROU !"
+                if besoin_redessiner && !ecran_en_veille {
+                    if alerte_active {
+                        if alerte_visible {
+                            let cause_niveau = if !niveau_ok { "Niveau: MANQUE !" } else { "" };
+                            let cause_moteur = if securite_moteur.actif() {
+                                if securite_moteur.verrouille() {
+                                    "Moteur: VERROU !"
+                                } else {
+                                    "Moteur: DEFAUT !"
+                                }
+                            } else {
+                                ""
+                            };
+                            ecran::afficher_alerte(&mut display, cause_niveau, cause_moteur)?;
                         } else {
-                            "Moteur: DEFAUT !"
+                            ecran::effacer(&mut display)?;
                         }
                     } else {
-                        ""
-                    };
-                    ecran::afficher_alerte(&mut display, cause_niveau, cause_moteur)?;
-                } else {
-                    ecran::effacer(&mut display)?;
+                        match page_ecran {
+                            0 => ecran::afficher_capteurs(
+                                &mut display,
+                                pompe.etat(),
+                                derniere_temperature_air.unwrap_or(f32::NAN),
+                                derniere_humidite.unwrap_or(f32::NAN),
+                                derniere_temperature_eau.unwrap_or(f32::NAN),
+                            )?,
+                            1 => ecran::afficher_connecte(&mut display, &ip_texte, wifi_rssi)?,
+                            2 => ecran::afficher_pompe(
+                                &mut display,
+                                pompe.etat(),
+                                boost.actif(),
+                                mode_texte,
+                                pompe.heures_aujourdhui(),
+                                heures_cibles,
+                                filtration_auto.anti_gel_actif(),
+                                filtration_auto.canicule_actif(),
+                                plage_debut,
+                                plage_fin,
+                                pompe.sessions_aujourdhui(),
+                            )?,
+                            3 => ecran::afficher_securite(
+                                &mut display,
+                                niveau_ok,
+                                securite_moteur.actif(),
+                                securite_moteur.verrouille(),
+                                systeme_sur,
+                                debut_programme.elapsed().as_secs(),
+                            )?,
+                            _ => ecran::afficher_bilan(
+                                &mut display,
+                                heure_locale
+                                    .map(|h| h.format("%d/%m/%Y").to_string())
+                                    .as_deref()
+                                    .unwrap_or("--/--/----"),
+                                pompe.heures_aujourdhui(),
+                                heures_cibles,
+                                temp_min_jour,
+                                temp_max_jour,
+                            )?,
+                        }
+                    }
+                    display
+                        .flush()
+                        .map_err(|e| anyhow::anyhow!("Erreur flush : {:?}", e))?;
+                    dernier_dessin = maintenant;
                 }
-            } else {
-                match page_ecran {
-                    0 => ecran::afficher_capteurs(
-                        &mut display,
-                        pompe.etat(),
-                        derniere_temperature_air.unwrap_or(f32::NAN),
-                        derniere_humidite.unwrap_or(f32::NAN),
-                        derniere_temperature_eau.unwrap_or(f32::NAN),
-                    )?,
-                    1 => ecran::afficher_connecte(&mut display, &ip_texte, wifi_rssi)?,
-                    2 => ecran::afficher_pompe(
-                        &mut display,
-                        pompe.etat(),
-                        boost.actif(),
-                        mode_texte,
-                        pompe.heures_aujourdhui(),
-                        heures_cibles,
-                        filtration_auto.anti_gel_actif(),
-                        filtration_auto.canicule_actif(),
-                        plage_debut,
-                        plage_fin,
-                        pompe.sessions_aujourdhui(),
-                    )?,
-                    3 => ecran::afficher_securite(
-                        &mut display,
-                        niveau_ok,
-                        securite_moteur.actif(),
-                        securite_moteur.verrouille(),
-                        systeme_sur,
-                        debut_programme.elapsed().as_secs(),
-                    )?,
-                    _ => ecran::afficher_bilan(
-                        &mut display,
-                        heure_locale
-                            .map(|h| h.format("%d/%m/%Y").to_string())
-                            .as_deref()
-                            .unwrap_or("--/--/----"),
-                        pompe.heures_aujourdhui(),
-                        heures_cibles,
-                        temp_min_jour,
-                        temp_max_jour,
-                    )?,
-                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = resultat_ecran {
+                warn!("Écran OLED : erreur d'affichage (ignorée) : {:?}", e);
             }
-            display
-                .flush()
-                .map_err(|e| anyhow::anyhow!("Erreur flush : {:?}", e))?;
-            dernier_dessin = maintenant;
-        }
-
-        Ok(())
-        })();
-
-        if let Err(e) = resultat_ecran {
-            warn!("Écran OLED : erreur d'affichage (ignorée) : {:?}", e);
-        }
         }
 
         page_ecran_precedente = page_ecran;
@@ -1022,6 +1100,7 @@ fn main() -> anyhow::Result<()> {
             donnees.gps_longitude = gps_position.map(|(_, lon)| lon);
             donnees.heure_automate = heure_automate.clone();
             donnees.historique_modes = historique.segments().to_vec();
+            donnees.historique_pompe = historique_pompe.segments().to_vec();
             donnees.tension_batterie_v = tension_batterie;
             donnees.tension_sortie_5v_v = tension_sortie_5v;
         }

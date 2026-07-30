@@ -31,14 +31,17 @@ pub const PCF_DEFAUT_RELAIS: u8 = 7; // Entrée J3 : défaut moteur / commande r
 pub const WIFI_SSID: &str = "TON_SSID_ICI";
 pub const WIFI_PASSWORD: &str = "TON_MOT_DE_PASSE_ICI";
 
-// ThingSpeak (cloud gratuit) — crée un canal sur thingspeak.com, Field 1 = température
-// eau, Field 2 = température air, Field 3 = humidité air.
-pub const THINGSPEAK_WRITE_API_KEY: &str = "TA_CLE_THINGSPEAK_ICI";
-
 // Adafruit IO (cloud gratuit) — crée un compte sur io.adafruit.com. Feeds attendus :
 // temp-eau, temp-air, humidite, pompe, mode, batterie, sortie-5v.
 pub const ADAFRUIT_IO_USERNAME: &str = "TON_NOM_UTILISATEUR_ADAFRUIT_ICI";
 pub const ADAFRUIT_IO_KEY: &str = "TA_CLE_ADAFRUIT_IO_ICI";
+
+// Clé du "Group" Adafruit IO regroupant les feeds ci-dessus (menu Feeds > Groups sur
+// io.adafruit.com), pour les envoyer en une seule requête HTTP au lieu de 7.
+pub const ADAFRUIT_IO_GROUP_KEY: &str = "TA_CLE_DE_GROUPE_ICI";
+
+/// Mettre à `false` pour couper tous les envois vers Adafruit IO.
+pub const ADAFRUIT_IO_ACTIF: bool = true;
 
 /// Mettre à `false` pour couper tous les logs sur le port série (info/avertissements).
 /// Aucun impact sur le fonctionnement (Wi-Fi, pompe, etc.) : ça coupe uniquement le texte

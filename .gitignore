@@ -6,3 +6,7 @@
 # Contient des secrets (Wi-Fi, clés ThingSpeak/Adafruit IO) — voir src/config.example.rs
 # pour le modèle à copier et remplir localement.
 /src/config.rs
+
+# Journaux du moniteur série (voir moniteur_serie.py) — usage local de débogage
+# uniquement, jamais committés.
+/logs

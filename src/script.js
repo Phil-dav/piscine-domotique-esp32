@@ -587,23 +587,15 @@ function updateFiltration(data) {
   if (markEnd)   markEnd.style.left   = toPercent(fin)   + '%';
   if (markEndLbl)   markEndLbl.textContent   = fmtHour(fin);
 
-  // ── Barre "fait" — toujours affichée (source NVS, toujours exacte) ──
-  const doneEl = document.getElementById('filtDone');
-  if (doneEl) {
-    const doneWidth = (Math.min(fait, objectif) / 24) * 100;
-    doneEl.style.left       = toPercent(debut) + '%';
-    doneEl.style.width      = doneWidth + '%';
-    doneEl.style.background = fait >= objectif
-      ? 'linear-gradient(90deg,#00aa44,#00ff88)'
-      : 'linear-gradient(90deg,#0055ff,#00aaff)';
-  }
-
-  // ── Segments de mode (historique coloré, par-dessus la barre) ──
+  // ── Segments de mode (bande du haut) : quel mode était sélectionné ──
   const timeline = document.getElementById('filtTimeline');
   const segs     = Array.isArray(data.modeHistory) ? data.modeHistory : [];
 
-  // Supprimer les anciens segments
-  if (timeline) timeline.querySelectorAll('.mode-seg').forEach(el => el.remove());
+  // Supprimer les anciens segments (mode + pompe)
+  if (timeline) {
+    timeline.querySelectorAll('.mode-seg').forEach(el => el.remove());
+    timeline.querySelectorAll('.pump-seg').forEach(el => el.remove());
+  }
 
   if (segs.length > 0 && timeline) {
     segs.forEach(seg => {
@@ -620,6 +612,31 @@ function updateFiltration(data) {
       el.style.left       = left + '%';
       el.style.width      = (right - left) + '%';
       el.style.background = MODE_SEG_COLORS[seg.t] || '#6b7280';
+      timeline.appendChild(el);
+    });
+  }
+
+  // ── Marche réelle de la pompe (bande du bas, bleu clair) ────
+  // Remplace l'ancien bloc "fait" synthétique (toujours ancré à l'heure de
+  // début programmée, donc faux dès que la pompe tourne hors de ce créneau,
+  // ex. via une marche forcée à cheval sur minuit) par les vrais instants
+  // marche/arrêt suivis côté firmware (`historique_pompe` dans main.rs).
+  const pumpSegs = Array.isArray(data.pumpHistory) ? data.pumpHistory : [];
+  if (pumpSegs.length > 0 && timeline) {
+    pumpSegs.forEach(seg => {
+      if (seg.t !== 1) return;  // seules les périodes "pompe en marche" sont dessinées
+      const segStart = seg.s;
+      const segEnd   = seg.e < 0 ? heureNow : seg.e;
+      if (segStart >= 24 || segEnd <= 0) return;
+
+      const left  = toPercent(segStart);
+      const right = toPercent(segEnd);
+      if (right <= left + 0.1) return;
+
+      const el = document.createElement('div');
+      el.className   = 'pump-seg';
+      el.style.left   = left + '%';
+      el.style.width  = (right - left) + '%';
       timeline.appendChild(el);
     });
   }

@@ -18,6 +18,9 @@ const CLE_TIMELINE: &str = "timeline";
 const CLE_TIMELINE_DATE: &str = "timeline_date";
 const CLE_POMPE_JOUR: &str = "pompe_jour";
 const CLE_POMPE_JOUR_DATE: &str = "pompe_jour_date";
+// Clés NVS limitées à 15 caractères par ESP-IDF, d'où les noms abrégés.
+const CLE_TIMELINE_POMPE: &str = "tl_pompe";
+const CLE_TIMELINE_POMPE_DATE: &str = "tl_pompe_date";
 
 const MAX_LIGNES_SESSIONS: usize = 25;
 const MAX_LIGNES_BILANS: usize = 31;
@@ -130,7 +133,11 @@ impl Journal {
     /// représente l'état du jour en cours, pas un historique à conserver dans le
     /// temps. La date est sauvegardée à part, pour savoir au redémarrage si ces
     /// segments appartiennent encore au jour en cours (voir `charger_timeline`).
-    pub fn sauvegarder_timeline(&mut self, date: &str, segments: &[crate::historique_modes::Segment]) {
+    pub fn sauvegarder_timeline(
+        &mut self,
+        date: &str,
+        segments: &[crate::historique_modes::Segment],
+    ) {
         let mut contenu = String::new();
         for s in segments {
             contenu.push_str(&format!("{:.3},{:.3},{}\n", s.debut, s.fin, s.type_segment));
@@ -139,7 +146,10 @@ impl Journal {
             warn!("Journal : échec écriture NVS '{}' : {:?}", CLE_TIMELINE, e);
         }
         if let Err(e) = self.nvs.set_blob(CLE_TIMELINE_DATE, date.as_bytes()) {
-            warn!("Journal : échec écriture NVS '{}' : {:?}", CLE_TIMELINE_DATE, e);
+            warn!(
+                "Journal : échec écriture NVS '{}' : {:?}",
+                CLE_TIMELINE_DATE, e
+            );
         }
     }
 
@@ -157,7 +167,60 @@ impl Journal {
                 let debut = champs.next()?.parse().ok()?;
                 let fin = champs.next()?.parse().ok()?;
                 let type_segment = champs.next()?.parse().ok()?;
-                Some(crate::historique_modes::Segment { debut, fin, type_segment })
+                Some(crate::historique_modes::Segment {
+                    debut,
+                    fin,
+                    type_segment,
+                })
+            })
+            .collect()
+    }
+
+    /// Même mécanisme que `sauvegarder_timeline`/`charger_timeline`, mais pour le
+    /// second historique : la marche RÉELLE de la pompe (0=arrêtée, 1=en marche),
+    /// indépendant du mode sélectionné (voir `historique_pompe` dans `main.rs`).
+    pub fn sauvegarder_timeline_pompe(
+        &mut self,
+        date: &str,
+        segments: &[crate::historique_modes::Segment],
+    ) {
+        let mut contenu = String::new();
+        for s in segments {
+            contenu.push_str(&format!("{:.3},{:.3},{}\n", s.debut, s.fin, s.type_segment));
+        }
+        if let Err(e) = self.nvs.set_blob(CLE_TIMELINE_POMPE, contenu.as_bytes()) {
+            warn!(
+                "Journal : échec écriture NVS '{}' : {:?}",
+                CLE_TIMELINE_POMPE, e
+            );
+        }
+        if let Err(e) = self.nvs.set_blob(CLE_TIMELINE_POMPE_DATE, date.as_bytes()) {
+            warn!(
+                "Journal : échec écriture NVS '{}' : {:?}",
+                CLE_TIMELINE_POMPE_DATE, e
+            );
+        }
+    }
+
+    pub fn charger_timeline_pompe(
+        &self,
+        date_actuelle: &str,
+    ) -> Vec<crate::historique_modes::Segment> {
+        if self.lire_blob(CLE_TIMELINE_POMPE_DATE) != date_actuelle {
+            return Vec::new();
+        }
+        self.lire_blob(CLE_TIMELINE_POMPE)
+            .lines()
+            .filter_map(|ligne| {
+                let mut champs = ligne.split(',');
+                let debut = champs.next()?.parse().ok()?;
+                let fin = champs.next()?.parse().ok()?;
+                let type_segment = champs.next()?.parse().ok()?;
+                Some(crate::historique_modes::Segment {
+                    debut,
+                    fin,
+                    type_segment,
+                })
             })
             .collect()
     }
@@ -170,10 +233,16 @@ impl Journal {
     pub fn sauvegarder_pompe_jour(&mut self, date: &str, heures: f32, sessions: u32) {
         let contenu = format!("{heures:.4},{sessions}");
         if let Err(e) = self.nvs.set_blob(CLE_POMPE_JOUR, contenu.as_bytes()) {
-            warn!("Journal : échec écriture NVS '{}' : {:?}", CLE_POMPE_JOUR, e);
+            warn!(
+                "Journal : échec écriture NVS '{}' : {:?}",
+                CLE_POMPE_JOUR, e
+            );
         }
         if let Err(e) = self.nvs.set_blob(CLE_POMPE_JOUR_DATE, date.as_bytes()) {
-            warn!("Journal : échec écriture NVS '{}' : {:?}", CLE_POMPE_JOUR_DATE, e);
+            warn!(
+                "Journal : échec écriture NVS '{}' : {:?}",
+                CLE_POMPE_JOUR_DATE, e
+            );
         }
     }
 

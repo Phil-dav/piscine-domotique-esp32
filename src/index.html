@@ -426,16 +426,6 @@
       transition: left 0.5s, width 0.5s;
     }
 
-    .filtr-done {
-      position: absolute;
-      top: 5px;
-      bottom: 5px;
-      background: linear-gradient(90deg, #0055dd, #00aaff);
-      border-radius: 3px;
-      transition: width 0.8s ease;
-      min-width: 4px;
-    }
-
     .filtr-cursor {
       position: absolute;
       top: -3px;
@@ -500,13 +490,25 @@
       margin-bottom: 10px;
     }
 
+    /* Bande du haut : quel mode était sélectionné (AUTO/MANUEL/OFF/BOOST). */
     .mode-seg {
       position: absolute;
       top: 4px;
-      bottom: 4px;
+      height: 12px;
       border-radius: 3px;
       pointer-events: none;
       opacity: 0.75;
+    }
+
+    /* Bande du bas : marche RÉELLE de la pompe (bleu clair), indépendante du mode. */
+    .pump-seg {
+      position: absolute;
+      bottom: 4px;
+      height: 10px;
+      border-radius: 3px;
+      pointer-events: none;
+      background: #7dd3fc;
+      opacity: 0.9;
     }
 
     .filtr-legend {
@@ -1127,7 +1129,6 @@
 
         <div class="filtr-timeline" id="filtTimeline">
           <div class="filtr-range" id="filtRange"></div>
-          <div class="filtr-done" id="filtDone"></div>
           <div class="filtr-cursor" id="filtCursor"></div>
           <div class="filtr-endline" id="filtEnd">
             <span class="filtr-endlabel" id="filtEndLabel"></span>
@@ -1152,6 +1153,7 @@
           <span class="legend-item"><span class="legend-dot" style="background:#a855f7"></span>Boost ON</span>
           <span class="legend-item"><span class="legend-dot" style="background:#ef4444"></span>Boost OFF</span>
           <span class="legend-item"><span class="legend-dot" style="background:#6b7280"></span>OFF</span>
+          <span class="legend-item"><span class="legend-dot" style="background:#7dd3fc"></span>Marche réelle pompe</span>
         </div>
 
         <div class="filtr-stats">

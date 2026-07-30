@@ -30,7 +30,12 @@ pub struct Sorties {
 }
 
 impl Sorties {
-    fn appliquer(&mut self, i2c: &RefCell<I2cDriver>, broche: u8, actif: bool) -> anyhow::Result<()> {
+    fn appliquer(
+        &mut self,
+        i2c: &RefCell<I2cDriver>,
+        broche: u8,
+        actif: bool,
+    ) -> anyhow::Result<()> {
         if actif {
             self.octet &= !(1 << broche); // LOW = actif
         } else {
@@ -75,7 +80,11 @@ pub fn lire_bouton_oled(i2c: &RefCell<I2cDriver>) -> anyhow::Result<bool> {
 }
 
 /// Pilote le relais pompe (P0).
-pub fn piloter_pompe(sorties: &mut Sorties, i2c: &RefCell<I2cDriver>, actif: bool) -> anyhow::Result<()> {
+pub fn piloter_pompe(
+    sorties: &mut Sorties,
+    i2c: &RefCell<I2cDriver>,
+    actif: bool,
+) -> anyhow::Result<()> {
     sorties.appliquer(i2c, PCF_RELAIS_POMPE, actif)
 }
 

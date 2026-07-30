@@ -87,12 +87,23 @@ where
     .ok();
 
     let mut ligne_air: String<32> = String::new();
-    write!(ligne_air, "Air:{:.1}C Hum:{:.0}%", temperature_air, humidite).ok();
+    write!(
+        ligne_air,
+        "Air:{:.1}C Hum:{:.0}%",
+        temperature_air, humidite
+    )
+    .ok();
 
     let mut ligne_eau: String<32> = String::new();
     write!(ligne_eau, "Eau: {:.1} C", temperature_eau).ok();
 
-    quatre_lignes(display, "Piscine ESP32", &ligne_pompe, &ligne_air, &ligne_eau)
+    quatre_lignes(
+        display,
+        "Piscine ESP32",
+        &ligne_pompe,
+        &ligne_air,
+        &ligne_eau,
+    )
 }
 
 /// Page 1 : état Wi-Fi connecté, adresse IP et niveau de réception.
@@ -110,7 +121,13 @@ where
         None => write!(ligne_rssi, "Signal : --").ok(),
     };
 
-    quatre_lignes(display, "Piscine ESP32", "Wifi connecte", &ligne_ip, &ligne_rssi)
+    quatre_lignes(
+        display,
+        "Piscine ESP32",
+        "Wifi connecte",
+        &ligne_ip,
+        &ligne_rssi,
+    )
 }
 
 /// Page 2 : pompe & filtration — état/mode, heures faites/objectif, régime ou plage, sessions du jour.
@@ -196,7 +213,12 @@ where
     .ok();
 
     let mut l3: String<32> = String::new();
-    write!(l3, "Secure: {}", if systeme_sur { "OK" } else { "ALERTE !" }).ok();
+    write!(
+        l3,
+        "Secure: {}",
+        if systeme_sur { "OK" } else { "ALERTE !" }
+    )
+    .ok();
 
     let mut l4: String<32> = String::new();
     write!(l4, "Uptime:{}", formater_duree(uptime_secondes)).ok();

@@ -52,7 +52,7 @@ pub struct EtatCapteurs {
 
     // --- Filtration automatique (mode AUTO) ---
     pub filt_objectif_heures: f32, // heures de filtration cibles aujourd'hui, selon la température
-    pub filt_debut_effectif: f32,  // plage horaire effective (heures décimales), selon le régime actif
+    pub filt_debut_effectif: f32, // plage horaire effective (heures décimales), selon le régime actif
     pub filt_fin_effective: f32,
     pub filt_debut_configure: f32, // plage horaire standard configurée (indépendante du régime actif)
     pub filt_fin_configuree: f32,
@@ -60,6 +60,9 @@ pub struct EtatCapteurs {
 
     // --- Historique des modes (timeline colorée du dashboard) ---
     pub historique_modes: Vec<crate::historique_modes::Segment>,
+    // Second historique, séparé : la marche RÉELLE de la pompe (0=arrêtée, 1=en
+    // marche), pour le tracé bleu clair fidèle du dashboard (voir main.rs).
+    pub historique_pompe: Vec<crate::historique_modes::Segment>,
 
     // --- Batterie / solaire (voir batterie.rs) ---
     pub tension_batterie_v: Option<f32>, // MTB 12 : bornes de la batterie
@@ -114,6 +117,7 @@ impl Default for EtatCapteurs {
             filt_fin_configuree: 20.0,
             demande_plage: None,
             historique_modes: Vec::new(),
+            historique_pompe: Vec::new(),
             tension_batterie_v: None,
             tension_sortie_5v_v: None,
         }

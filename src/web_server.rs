@@ -111,9 +111,20 @@ pub fn demarrer(
                 })
                 .collect::<Vec<_>>()
                 .join(",");
+            let pump_history = donnees
+                .historique_pompe
+                .iter()
+                .map(|seg| {
+                    format!(
+                        r#"{{"s":{:.3},"e":{:.3},"t":{}}}"#,
+                        seg.debut, seg.fin, seg.type_segment
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
 
             let json = format!(
-                r#"{{"temperature":{temp_air},"humidity":{hum},"waterTemperature":{temp_eau},"waterProbeStale":{probe_stale},"waterProbeAge":{probe_age},"pumpActive":{pump},"pumpBlocked":{pblocked},"filtFait":{ffait},"filtObjectif":{fobj},"filtDebut":{fdeb},"filtFin":{ffin},"waterLevel":{level},"motorFault":{mfault},"motorFaultLatched":{mlatch},"antiGel":{gel},"canicule":{can},"mode":"{mode}","boostActive":{bactive},"boostRemaining":{brem},"boostForceOn":{bforce},"boostDuration":{bdur},"wifiRssi":{wrssi},"wifiIp":"{wip}","gpsOk":{gok},"gpsSats":{gsat},"gpsLat":{glat},"gpsLon":{glon},"heureAutomate":"{heure}","modeHistory":[{mode_history}],"batteryV":{batt_v},"solarOutV":{sortie_v}}}"#,
+                r#"{{"temperature":{temp_air},"humidity":{hum},"waterTemperature":{temp_eau},"waterProbeStale":{probe_stale},"waterProbeAge":{probe_age},"pumpActive":{pump},"pumpBlocked":{pblocked},"filtFait":{ffait},"filtObjectif":{fobj},"filtDebut":{fdeb},"filtFin":{ffin},"waterLevel":{level},"motorFault":{mfault},"motorFaultLatched":{mlatch},"antiGel":{gel},"canicule":{can},"mode":"{mode}","boostActive":{bactive},"boostRemaining":{brem},"boostForceOn":{bforce},"boostDuration":{bdur},"wifiRssi":{wrssi},"wifiIp":"{wip}","gpsOk":{gok},"gpsSats":{gsat},"gpsLat":{glat},"gpsLon":{glon},"heureAutomate":"{heure}","modeHistory":[{mode_history}],"pumpHistory":[{pump_history}],"batteryV":{batt_v},"solarOutV":{sortie_v}}}"#,
                 temp_air = temp_air,
                 hum = hum,
                 temp_eau = temp_eau,
@@ -240,7 +251,9 @@ pub fn demarrer(
                     drop(donnees);
                     let mut resp =
                         req.into_response(400, None, &[("Content-Type", "text/plain")])?;
-                    resp.write_all("Parametre 'action' manquant ou invalide (start/stop)".as_bytes())?;
+                    resp.write_all(
+                        "Parametre 'action' manquant ou invalide (start/stop)".as_bytes(),
+                    )?;
                     return Ok(());
                 }
             }
@@ -288,8 +301,7 @@ pub fn demarrer(
             );
             drop(donnees);
 
-            let mut resp =
-                req.into_response(200, None, &[("Content-Type", "application/json")])?;
+            let mut resp = req.into_response(200, None, &[("Content-Type", "application/json")])?;
             resp.write_all(json.as_bytes())?;
             Ok(())
         },

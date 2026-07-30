@@ -36,7 +36,10 @@ impl Gps {
     pub fn mettre_a_jour(&mut self) -> anyhow::Result<()> {
         let mut buffer = [0u8; 64];
         loop {
-            match self.uart.read(&mut buffer, esp_idf_svc::hal::delay::NON_BLOCK) {
+            match self
+                .uart
+                .read(&mut buffer, esp_idf_svc::hal::delay::NON_BLOCK)
+            {
                 Ok(lus) => {
                     for &octet in &buffer[..lus] {
                         if let Some(Ok(resultat)) = self.parser.parse_from_byte(octet) {
@@ -56,9 +59,11 @@ impl Gps {
     fn traiter_trame(&mut self, resultat: ParseResult) {
         match resultat {
             ParseResult::RMC(Some(rmc)) => {
-                if let Some(date) =
-                    NaiveDate::from_ymd_opt(rmc.datetime.date.year as i32, rmc.datetime.date.month as u32, rmc.datetime.date.day as u32)
-                {
+                if let Some(date) = NaiveDate::from_ymd_opt(
+                    rmc.datetime.date.year as i32,
+                    rmc.datetime.date.month as u32,
+                    rmc.datetime.date.day as u32,
+                ) {
                     let secondes_depuis_minuit = rmc.datetime.time.hours as u32 * 3600
                         + rmc.datetime.time.minutes as u32 * 60
                         + rmc.datetime.time.seconds as u32;
@@ -68,8 +73,11 @@ impl Gps {
             ParseResult::GGA(Some(gga)) => {
                 self.satellites = gga.sat_in_use;
                 self.dernier_satellites = Some(Instant::now());
-                self.derniere_position =
-                    Some((gga.latitude.as_f64(), gga.longitude.as_f64(), Instant::now()));
+                self.derniere_position = Some((
+                    gga.latitude.as_f64(),
+                    gga.longitude.as_f64(),
+                    Instant::now(),
+                ));
             }
             _ => {}
         }

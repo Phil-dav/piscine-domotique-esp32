@@ -1,14 +1,20 @@
-//! Envoi vers Adafruit IO (cloud gratuit), en parallèle de ThingSpeak (voir
-//! `thingspeak.rs` et la mémoire projet-cloud-thingspeak-alertes) : mêmes
-//! mesures, tableaux de bord plus modernes à comparer. Feeds attendus côté
-//! Adafruit IO : `temp-eau`, `temp-air`, `humidite`, `pompe`, `mode`,
-//! `batterie`, `sortie-5v`.
+//! Envoi vers Adafruit IO (cloud gratuit) — seul service cloud du projet depuis
+//! le retrait de ThingSpeak le 29/07/2026 (graphiques jugés moins bons par
+//! l'utilisateur). Feeds attendus : `temp-eau`, `temp-air`, `humidite`,
+//! `pompe`, `mode`, `batterie`, `sortie-5v`.
 //!
-//! Contrairement à ThingSpeak (un seul appel HTTP peut mettre à jour plusieurs
-//! champs à la fois), l'API Adafruit IO ne met à jour qu'**un seul feed par
-//! requête** — une mesure combinée se traduit donc par plusieurs requêtes HTTP
-//! successives. Comme pour ThingSpeak, tout ça tourne dans un **fil dédié**,
-//! jamais dans la boucle principale surveillée par le Task Watchdog (voir
+//! L'API Adafruit IO de base ne met à jour qu'**un seul feed par requête** —
+//! une mesure combinée se traduisait donc par jusqu'à 7 requêtes HTTP
+//! successives. Cette charge réseau aggravait les erreurs CRC de la sonde
+//! DS18B20 (contention avec le protocole 1-Wire, très sensible au minutage —
+//! voir la mémoire projet-sonde-eau-decrochages, confirmé par test le
+//! 28/07/2026). Correctif du 29/07/2026 : les 7 feeds sont rattachés à un
+//! "Group" Adafruit IO (`config::ADAFRUIT_IO_GROUP_KEY`) et partent maintenant
+//! tous ensemble en **une seule requête groupée** par cycle, via l'API "Group
+//! Data" (`POST /groups/{groupe}/data`).
+//!
+//! Tout ça tourne dans un **fil dédié**, jamais dans la boucle principale
+//! surveillée par le Task Watchdog (voir
 //! `projet-piege-appels-reseau-bloquants` : un appel réseau bloquant dans la
 //! boucle principale a déjà provoqué de vrais redémarrages).
 
@@ -21,8 +27,6 @@ use log::{info, warn};
 
 const DELAI_PAR_OPERATION: Duration = Duration::from_secs(3);
 const TAILLE_PILE: usize = 10240;
-/// Plus profonde que celle de ThingSpeak (4) : une seule mise à jour combinée
-/// peut se décomposer en jusqu'à 7 requêtes successives (une par feed).
 const PROFONDEUR_FILE: usize = 32;
 
 /// Un envoi vers Adafruit IO. Les champs `None` sont simplement omis (aucune
@@ -74,18 +78,21 @@ pub struct Expediteur {
 
 impl Expediteur {
     /// Démarre le fil d'envoi dédié. À appeler une seule fois, au démarrage.
-    pub fn demarrer(username: &'static str, cle: &'static str) -> anyhow::Result<Self> {
+    pub fn demarrer(
+        username: &'static str,
+        cle: &'static str,
+        groupe: &'static str,
+    ) -> anyhow::Result<Self> {
         let (file, reception) = mpsc::sync_channel::<Mesures>(PROFONDEUR_FILE);
         std::thread::Builder::new()
             .name("adafruit_io".into())
             .stack_size(TAILLE_PILE)
-            .spawn(move || boucle_envoi(username, cle, reception))?;
+            .spawn(move || boucle_envoi(username, cle, groupe, reception))?;
         Ok(Expediteur { file })
     }
 
     /// Dépose des mesures dans la file d'envoi et rend la main immédiatement.
-    /// Comportement identique à `thingspeak::Expediteur::envoyer` : file pleine
-    /// ou fil arrêté ne sont jamais fatals, juste journalisés.
+    /// File pleine ou fil arrêté ne sont jamais fatals, juste journalisés.
     pub fn envoyer(&self, mesures: Mesures) {
         match self.file.try_send(mesures) {
             Ok(()) => {}
@@ -99,23 +106,37 @@ impl Expediteur {
     }
 }
 
-/// Boucle du fil dédié : attend des mesures, envoie chaque feed présent l'un
-/// après l'autre. Non surveillé par le Task Watchdog, peut bloquer sur le
+/// Boucle du fil dédié : envoie toutes les mesures présentes en une seule
+/// requête groupée. Non surveillé par le Task Watchdog, peut bloquer sur le
 /// réseau sans conséquence pour le reste du programme.
-fn boucle_envoi(username: &str, cle: &str, reception: Receiver<Mesures>) {
+fn boucle_envoi(username: &str, cle: &str, groupe: &str, reception: Receiver<Mesures>) {
     while let Ok(mesures) = reception.recv() {
-        for (feed, valeur) in mesures.envois() {
-            if let Err(e) = envoyer_bloquant(username, cle, feed, &valeur) {
-                warn!("Adafruit IO : échec de l'envoi de '{feed}' (ignoré) : {:?}", e);
+        let envois = mesures.envois();
+        if !envois.is_empty() {
+            if let Err(e) = envoyer_groupe_bloquant(username, cle, groupe, &envois) {
+                warn!("Adafruit IO : échec de l'envoi groupé (ignoré) : {:?}", e);
             }
         }
     }
     warn!("Adafruit IO : fil d'envoi terminé");
 }
 
-fn envoyer_bloquant(username: &str, cle: &str, feed: &str, valeur: &str) -> anyhow::Result<()> {
-    let url = format!("https://io.adafruit.com/api/v2/{username}/feeds/{feed}/data");
-    let corps = format!(r#"{{"value":"{valeur}"}}"#);
+/// Envoie plusieurs feeds en une seule requête HTTP via l'API "Group Data"
+/// d'Adafruit IO (`POST /groups/{groupe}/data`, corps `{"feeds":[{"key":...,
+/// "value":...}, ...]}`) — voir le commentaire de module pour le contexte.
+fn envoyer_groupe_bloquant(
+    username: &str,
+    cle: &str,
+    groupe: &str,
+    feeds: &[(&str, String)],
+) -> anyhow::Result<()> {
+    let url = format!("https://io.adafruit.com/api/v2/{username}/groups/{groupe}/data");
+    let feeds_json = feeds
+        .iter()
+        .map(|(feed, valeur)| format!(r#"{{"key":"{feed}","value":"{valeur}"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    let corps = format!(r#"{{"feeds":[{feeds_json}]}}"#);
     let longueur = corps.len().to_string();
 
     let connection = EspHttpConnection::new(&HttpConfiguration {
@@ -136,9 +157,12 @@ fn envoyer_bloquant(username: &str, cle: &str, feed: &str, valeur: &str) -> anyh
     let statut = response.status();
 
     if (200..300).contains(&statut) {
-        info!("Adafruit IO : '{feed}' envoyé (HTTP {statut})");
+        info!(
+            "Adafruit IO : envoi groupé réussi ({} feed(s), HTTP {statut})",
+            feeds.len()
+        );
     } else {
-        warn!("Adafruit IO : réponse inattendue pour '{feed}' (HTTP {statut})");
+        warn!("Adafruit IO : réponse inattendue pour l'envoi groupé (HTTP {statut})");
     }
 
     Ok(())
