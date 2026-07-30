@@ -74,6 +74,13 @@ Détail du câblage du PCF8574 : P0 pilote le relais pompe, P3 le relais de
 défaut système, P4/P5/P6 lisent respectivement le bouton écran et
 l'interrupteur de mode (MANU/AUTO), P7 lit le retour de défaut moteur.
 
+![Schéma électronique du montage](docs/schema-electronique.png)
+
+Schéma KiCad complet du montage. Il inclut deux blocs anticipés dans la
+conception (carte micro SD, interrupteur de logs série) qui sont déjà câblés
+mais **pas encore pris en charge par le firmware actuel** — schéma établi en
+amont de la réalisation, comme il est d'usage en électronique.
+
 ## Organisation des fichiers
 
 Tout part de `main.rs`, qui orchestre les modules ci-dessous (capteurs, sécurité,
