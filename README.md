@@ -15,6 +15,7 @@ C++/PlatformIO de référence.
 - [Aperçu](#aperçu)
 - [Fonctionnalités](#fonctionnalités)
 - [Architecture matérielle](#architecture-matérielle)
+- [Organisation des fichiers](#organisation-des-fichiers)
 - [Démarrage](#démarrage)
 - [Tableau de bord web](#tableau-de-bord-web)
 - [État du projet](#état-du-projet)
@@ -72,6 +73,49 @@ externe pour fonctionner au quotidien.
 Détail du câblage du PCF8574 : P0 pilote le relais pompe, P3 le relais de
 défaut système, P4/P5/P6 lisent respectivement le bouton écran et
 l'interrupteur de mode (MANU/AUTO), P7 lit le retour de défaut moteur.
+
+## Organisation des fichiers
+
+Tout part de `main.rs`, qui orchestre les modules ci-dessous (capteurs, sécurité,
+réseau, persistance) à chaque tour de la boucle principale.
+
+```text
+src/
+├── main.rs             Point d'entrée : boucle principale, initialisation matérielle,
+│                        orchestration de tous les modules ci-dessous
+├── config.rs            Identifiants et réglages (Wi-Fi, Adafruit IO, broches) — non
+│                        suivi par Git, voir config.example.rs pour le modèle
+├── config.example.rs    Modèle de config.rs à copier et remplir localement
+│
+├── Capteurs
+│   ├── aht10.rs          Driver du capteur AHT10 (température/humidité air)
+│   ├── ds18b20.rs        Driver de la sonde DS18B20 (température eau, 1-Wire)
+│   ├── gps.rs            Lecture des trames NMEA du module GPS
+│   ├── niveau_eau.rs     Détection du niveau d'eau (sécurité)
+│   └── batterie.rs       Lecture des tensions batterie/solaire (ADC)
+│
+├── Pilotage
+│   ├── pcf8574.rs        Pilotage de l'expandeur I2C (relais, boutons, interrupteur)
+│   ├── pompe.rs          État de la pompe (marche/arrêt, anti-claquement, compteurs)
+│   ├── boost.rs          Marche/arrêt forcée temporaire
+│   ├── filtration_auto.rs  Calcul de la durée de filtration (mode AUTO)
+│   ├── securite.rs       Détection défaut moteur
+│   └── historique_modes.rs  Historique coloré des modes pour la timeline du dashboard
+│
+├── Stockage et journalisation
+│   ├── stockage.rs       Accès générique à la mémoire NVS (clé/valeur)
+│   ├── journal.rs        Journaux persistés : sessions pompe, bilans, alertes
+│   └── temps.rs          Conversion d'heure (UTC vers Europe/Paris, DST)
+│
+├── Réseau et interface
+│   ├── wifi.rs           Connexion Wi-Fi
+│   ├── web_server.rs     Serveur web embarqué : routes HTTP et API du dashboard
+│   ├── adafruit_io.rs    Envoi des mesures vers Adafruit IO (cloud)
+│   ├── etat_partage.rs   État partagé entre la boucle principale et le serveur web
+│   ├── ecran.rs          Affichage sur l'écran OLED de diagnostic
+│   ├── index.html        Page du tableau de bord
+│   └── script.js         Logique JavaScript du tableau de bord
+```
 
 ## Démarrage
 
