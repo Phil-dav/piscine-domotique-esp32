@@ -144,7 +144,7 @@ requis) : mesures en temps réel, contrôle de la pompe et du mode, timeline
 colorée de la journée, historique des sessions/alertes, réglage de la plage
 de filtration.
 
-Captures d'écran à ajouter.
+![Tableau de bord web](docs/dashboard-web.png)
 
 ## État du projet
 
