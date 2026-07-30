@@ -1,3 +1,5 @@
+![Logo Phil Domo](docs/logo-phil-domo.png)
+
 # Gestion de filtration piscine — ESP32 / Rust
 
 ![Rust](https://img.shields.io/badge/Rust-esp--idf--hal-orange)
