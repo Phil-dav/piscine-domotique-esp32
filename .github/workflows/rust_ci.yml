@@ -38,5 +38,7 @@ jobs:
           ldproxy: true
       - name: Enable caching
         uses: Swatinem/rust-cache@v2
+      - name: Préparer config.rs (valeurs fictives, non suivi par Git)
+        run: cp src/config.example.rs src/config.rs
       - name: Run command
         run: cargo ${{ matrix.action.command }} ${{ matrix.action.args }}
