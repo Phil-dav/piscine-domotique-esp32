@@ -8,8 +8,29 @@ use log::info;
 use crate::etat_partage::EtatPartage;
 use crate::journal::Journal;
 
-const INDEX_HTML: &str = include_str!("index.html");
-const SCRIPT_JS: &str = include_str!("script.js");
+// Deux dashboards possibles, choisis à la compilation via `config::DASHBOARD_SIMPLIFIE` :
+// le complet (contrôle pompe, mode, filtration, journaux) ou une version allégée en
+// lecture seule (température eau/air, humidité, GPS/position/Wi-Fi) pour un montage
+// identique installé ailleurs, dédié à la simple consultation.
+const INDEX_HTML: &str = if crate::config::DASHBOARD_SIMPLIFIE {
+    include_str!("index_simple.html")
+} else {
+    include_str!("index.html")
+};
+const SCRIPT_JS: &str = if crate::config::DASHBOARD_SIMPLIFIE {
+    include_str!("script_simple.js")
+} else {
+    include_str!("script.js")
+};
+
+/// Logo Phil Domo recadré en icône (64x64, ~4,6 Ko). Les navigateurs demandent
+/// automatiquement `/favicon.ico` (et parfois les icônes Apple) à chaque chargement de
+/// page, qu'on le veuille ou non — avant cette route, ces requêtes tombaient sur le
+/// traitement générique "404 non trouvé", plus lent, jamais mis en cache, et
+/// consommant une des 4 connexions simultanées que le serveur peut gérer. Servir une
+/// vraie image ici, avec un cache long, répond plus vite et libère cette connexion
+/// pour les ressources qui comptent vraiment (page, script, données).
+const FAVICON: &[u8] = include_bytes!("favicon.png");
 
 /// Extrait la valeur d'un paramètre de requête simple (`?a=1&b=2`), sans décodage URL
 /// (les valeurs utilisées ici — nombres, mots-clés — n'en ont pas besoin).
@@ -32,11 +53,29 @@ pub fn demarrer(
     let mut server = EspHttpServer::new(&HttpConfig::default())?;
 
     // --- Page principale ---
+    // Historique : un premier correctif (02/08/2026) avait mis `Cache-Control: no-store`
+    // sur les trois routes (/, /script.js, /sensors) pour éviter qu'un navigateur ne
+    // garde indéfiniment une page périmée après un simple rechargement. Mais / et
+    // /script.js sont volumineux (toute la page HTML/CSS), et forcer leur retransmission
+    // complète à chaque chargement a révélé une fragilité du petit serveur web de
+    // l'ESP32 sur les envois volumineux (`httpd_sock_err: error in send : 11`,
+    // observé le 02/08/2026 — page vide/bloquée côté navigateur). Compromis retenu :
+    // `max-age=30` sur / et /script.js (contenu qui ne change qu'au reflash — 30 s de
+    // décalage maximum est largement acceptable, et évite de retransmettre inutilement
+    // une grosse page à chaque rechargement). `/sensors` (petit, interrogé toutes les
+    // 2 s) garde `no-store`, c'est là que la fraîcheur compte réellement.
     server.fn_handler(
         "/",
         esp_idf_svc::http::Method::Get,
         |req| -> Result<(), EspIOError> {
-            let mut resp = req.into_ok_response()?;
+            let mut resp = req.into_response(
+                200,
+                None,
+                &[
+                    ("Content-Type", "text/html"),
+                    ("Cache-Control", "max-age=30"),
+                ],
+            )?;
             resp.write_all(INDEX_HTML.as_bytes())?;
             Ok(())
         },
@@ -47,12 +86,42 @@ pub fn demarrer(
         "/script.js",
         esp_idf_svc::http::Method::Get,
         |req| -> Result<(), EspIOError> {
-            let mut resp =
-                req.into_response(200, None, &[("Content-Type", "application/javascript")])?;
+            let mut resp = req.into_response(
+                200,
+                None,
+                &[
+                    ("Content-Type", "application/javascript"),
+                    ("Cache-Control", "max-age=30"),
+                ],
+            )?;
             resp.write_all(SCRIPT_JS.as_bytes())?;
             Ok(())
         },
     )?;
+
+    // --- Favicon (voir commentaire sur la constante FAVICON) ---
+    for chemin in [
+        "/favicon.ico",
+        "/apple-touch-icon.png",
+        "/apple-touch-icon-precomposed.png",
+    ] {
+        server.fn_handler(
+            chemin,
+            esp_idf_svc::http::Method::Get,
+            |req| -> Result<(), EspIOError> {
+                let mut resp = req.into_response(
+                    200,
+                    None,
+                    &[
+                        ("Content-Type", "image/png"),
+                        ("Cache-Control", "max-age=604800"),
+                    ],
+                )?;
+                resp.write_all(FAVICON)?;
+                Ok(())
+            },
+        )?;
+    }
 
     // --- Données capteurs (JSON) ---
     let etat_sensors = etat.clone();
@@ -124,7 +193,7 @@ pub fn demarrer(
                 .join(",");
 
             let json = format!(
-                r#"{{"temperature":{temp_air},"humidity":{hum},"waterTemperature":{temp_eau},"waterProbeStale":{probe_stale},"waterProbeAge":{probe_age},"pumpActive":{pump},"pumpBlocked":{pblocked},"filtFait":{ffait},"filtObjectif":{fobj},"filtDebut":{fdeb},"filtFin":{ffin},"waterLevel":{level},"motorFault":{mfault},"motorFaultLatched":{mlatch},"antiGel":{gel},"canicule":{can},"mode":"{mode}","boostActive":{bactive},"boostRemaining":{brem},"boostForceOn":{bforce},"boostDuration":{bdur},"wifiRssi":{wrssi},"wifiIp":"{wip}","gpsOk":{gok},"gpsSats":{gsat},"gpsLat":{glat},"gpsLon":{glon},"heureAutomate":"{heure}","modeHistory":[{mode_history}],"pumpHistory":[{pump_history}],"batteryV":{batt_v},"solarOutV":{sortie_v}}}"#,
+                r#"{{"temperature":{temp_air},"humidity":{hum},"waterTemperature":{temp_eau},"waterProbeStale":{probe_stale},"waterProbeAge":{probe_age},"pumpActive":{pump},"pumpBlocked":{pblocked},"filtFait":{ffait},"filtObjectif":{fobj},"filtDebut":{fdeb},"filtFin":{ffin},"waterLevel":{level},"motorFault":{mfault},"motorFaultLatched":{mlatch},"pcf8574Fault":{pfault},"antiGel":{gel},"canicule":{can},"mode":"{mode}","boostActive":{bactive},"boostRemaining":{brem},"boostForceOn":{bforce},"boostDuration":{bdur},"wifiRssi":{wrssi},"wifiIp":"{wip}","gpsOk":{gok},"gpsSats":{gsat},"gpsLat":{glat},"gpsLon":{glon},"heureAutomate":"{heure}","modeHistory":[{mode_history}],"pumpHistory":[{pump_history}],"batteryV":{batt_v},"solarOutV":{sortie_v}}}"#,
                 temp_air = temp_air,
                 hum = hum,
                 temp_eau = temp_eau,
@@ -142,6 +211,7 @@ pub fn demarrer(
                 level = donnees.niveau_eau_ok,
                 mfault = donnees.defaut_moteur,
                 mlatch = donnees.defaut_moteur_verrouille,
+                pfault = donnees.pcf8574_injoignable,
                 gel = donnees.anti_gel,
                 can = donnees.canicule,
                 mode = mode,
@@ -161,8 +231,14 @@ pub fn demarrer(
             );
             drop(donnees);
 
-            let mut resp =
-                req.into_response(200, None, &[("Content-Type", "application/json")])?;
+            let mut resp = req.into_response(
+                200,
+                None,
+                &[
+                    ("Content-Type", "application/json"),
+                    ("Cache-Control", "no-store"),
+                ],
+            )?;
             resp.write_all(json.as_bytes())?;
             Ok(())
         },

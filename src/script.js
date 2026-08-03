@@ -125,6 +125,10 @@ function fetchAllData() {
         }
       }
 
+      if (data.pcf8574Fault) {
+        faults.push('⚠ PCF8574 INJOIGNABLE — pompe et relais défaut non pilotés, nouvel essai en continu');
+      }
+
       // Alertes thermiques
       if (data.antiGel)       faults.push('⚠ ANTI-GEL actif — pompe forcée en continu (T° eau < 4°C)');
       if (data.canicule)      faults.push('⚠ CANICULE active — filtration continue (T° eau > 28°C)');
@@ -526,6 +530,15 @@ function updateTimeSource(data) {
 
 // Couleurs des segments selon le type : 0=OFF, 1=AUTO, 2=MANU_ON, 3=MANU_OFF, 4=BOOST_ON, 5=BOOST_OFF
 const MODE_SEG_COLORS = ['#6b7280', '#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ef4444'];
+const MODE_SEG_LABELS = ['OFF', 'AUTO', 'Manuel ON', 'Manuel OFF', 'Boost ON', 'Boost OFF'];
+
+// Heure décimale (ex. 8.5) → "08:30", pour les infobulles (plus précis que fmtHour,
+// qui arrondit à la demi-heure pour les repères de plage).
+function fmtHeureMin(h) {
+  const hh = Math.floor(h);
+  const mm = Math.round((h - hh) * 60);
+  return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0');
+}
 
 /**
  * Met à jour la carte de progression de filtration.
@@ -578,14 +591,24 @@ function updateFiltration(data) {
   }
 
   // ── Marqueurs visuels début / fin de plage (traits bleus) ──
+  // Masqués quand la plage couvre déjà toute la journée (anti-gel/canicule,
+  // 0h-24h) : ils tomberaient exactement sur les repères fixes 0h/24h de
+  // l'axe, créant un texte dédoublé (un plus clair par-dessus un plus
+  // sombre) sans apporter d'information utile — "toute la journée" se
+  // suffit à lui-même.
+  const plageJourneeComplete = debut <= 0 && fin >= 24;
   const markStart    = document.getElementById('filtWindowStart');
   const markStartLbl = document.getElementById('filtWindowStartLabel');
   const markEnd      = document.getElementById('filtWindowEnd');
   const markEndLbl   = document.getElementById('filtWindowEndLabel');
-  if (markStart) markStart.style.left = toPercent(debut) + '%';
-  if (markStartLbl) markStartLbl.textContent = fmtHour(debut);
-  if (markEnd)   markEnd.style.left   = toPercent(fin)   + '%';
-  if (markEndLbl)   markEndLbl.textContent   = fmtHour(fin);
+  if (markStart) markStart.style.display = plageJourneeComplete ? 'none' : '';
+  if (markEnd)   markEnd.style.display   = plageJourneeComplete ? 'none' : '';
+  if (!plageJourneeComplete) {
+    if (markStart)    markStart.style.left = toPercent(debut) + '%';
+    if (markStartLbl) markStartLbl.textContent = fmtHour(debut);
+    if (markEnd)       markEnd.style.left   = toPercent(fin)   + '%';
+    if (markEndLbl)     markEndLbl.textContent   = fmtHour(fin);
+  }
 
   // ── Segments de mode (bande du haut) : quel mode était sélectionné ──
   const timeline = document.getElementById('filtTimeline');
@@ -595,6 +618,7 @@ function updateFiltration(data) {
   if (timeline) {
     timeline.querySelectorAll('.mode-seg').forEach(el => el.remove());
     timeline.querySelectorAll('.pump-seg').forEach(el => el.remove());
+    timeline.querySelectorAll('.seg-marker').forEach(el => el.remove());
   }
 
   if (segs.length > 0 && timeline) {
@@ -612,7 +636,18 @@ function updateFiltration(data) {
       el.style.left       = left + '%';
       el.style.width      = (right - left) + '%';
       el.style.background = MODE_SEG_COLORS[seg.t] || '#6b7280';
+      el.title = (MODE_SEG_LABELS[seg.t] || '?') + ' : '
+               + fmtHeureMin(segStart) + ' – ' + fmtHeureMin(segEnd);
       timeline.appendChild(el);
+
+      // Petit repère au-dessus de la barre à chaque changement de mode (sauf
+      // tout début de journée, sans intérêt à marquer).
+      if (segStart > 0.01) {
+        const marker = document.createElement('div');
+        marker.className = 'seg-marker';
+        marker.style.left = left + '%';
+        timeline.appendChild(marker);
+      }
     });
   }
 
@@ -637,14 +672,21 @@ function updateFiltration(data) {
       el.className   = 'pump-seg';
       el.style.left   = left + '%';
       el.style.width  = (right - left) + '%';
+      el.title = 'Pompe en marche : ' + fmtHeureMin(segStart) + ' – ' + fmtHeureMin(segEnd);
       timeline.appendChild(el);
     });
   }
 
-  // ── Curseur heure actuelle (trait blanc) ───────────────────
+  // ── Curseur heure actuelle (trait blanc + heure affichée au-dessus) ──
   const cursorEl = document.getElementById('filtCursor');
   if (cursorEl) {
     cursorEl.style.left = toPercent(heureNow) + '%';
+  }
+  const cursorLbl = document.getElementById('filtCursorLabel');
+  if (cursorLbl) {
+    const maintenant = new Date();
+    cursorLbl.textContent = String(maintenant.getHours()).padStart(2, '0') + ':'
+                           + String(maintenant.getMinutes()).padStart(2, '0');
   }
 
   // ── Fin théorique de filtration (trait vert) ───────────────

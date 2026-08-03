@@ -5,6 +5,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Piscine — Domotique ESP32</title>
+  <link rel="icon" type="image/png" href="/favicon.ico">
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
   <style>
     *,
@@ -215,6 +216,35 @@
       font-family: 'Orbitron', monospace; font-size: 0.82rem;
       font-weight: 700; color: #4a6888; transition: color 0.4s;
     }
+
+    /* ── Ligne horloge + lien Adafruit IO ────────────────────── */
+    .header-clock-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+    }
+    .adafruit-badge {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 12px;
+      border: 1px solid #1a3050; border-radius: 8px;
+      background: rgba(255,255,255,0.03);
+      text-decoration: none; cursor: pointer;
+      transition: border-color 0.4s, box-shadow 0.4s;
+    }
+    .adafruit-badge:hover {
+      border-color: #38bdf8; box-shadow: 0 0 10px rgba(56,189,248,0.2);
+    }
+    .adafruit-icon { width: 20px; height: 20px; flex-shrink: 0; color: #38bdf8; }
+    .adafruit-info { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; }
+    .adafruit-label {
+      font-size: 0.55rem; color: #4a6888;
+      text-transform: uppercase; letter-spacing: 1.5px; font-family: Arial, sans-serif;
+    }
+    .adafruit-sub {
+      font-family: 'Orbitron', monospace; font-size: 0.75rem;
+      font-weight: 700; color: #38bdf8;
+    }
     .battery-subvalue {
       font-family: 'Orbitron', monospace; font-size: 0.6rem;
       color: #4a6888;
@@ -373,7 +403,7 @@
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
-      margin-bottom: 14px;
+      margin-bottom: 22px;
     }
 
     .filtr-phase {
@@ -490,13 +520,16 @@
       margin-bottom: 10px;
     }
 
-    /* Bande du haut : quel mode était sélectionné (AUTO/MANUEL/OFF/BOOST). */
+    /* Bande du haut : quel mode était sélectionné (AUTO/MANUEL/OFF/BOOST).
+       pointer-events: auto (contrairement au reste, discret) pour que l'infobulle
+       native du navigateur (attribut title) s'affiche au survol d'un segment. */
     .mode-seg {
       position: absolute;
       top: 4px;
       height: 12px;
       border-radius: 3px;
-      pointer-events: none;
+      border-left: 1px solid rgba(10, 15, 25, 0.85);
+      pointer-events: auto;
       opacity: 0.75;
     }
 
@@ -506,9 +539,37 @@
       bottom: 4px;
       height: 10px;
       border-radius: 3px;
-      pointer-events: none;
+      border-left: 1px solid rgba(10, 15, 25, 0.85);
+      pointer-events: auto;
       background: #7dd3fc;
       opacity: 0.9;
+    }
+
+    /* Petit repère triangulaire au-dessus de la barre, à chaque changement de
+       mode (transition), pour le repérer visuellement sans avoir à survoler. */
+    .seg-marker {
+      position: absolute;
+      top: -6px;
+      width: 0;
+      height: 0;
+      border-left: 3px solid transparent;
+      border-right: 3px solid transparent;
+      border-top: 4px solid rgba(255, 255, 255, 0.65);
+      transform: translateX(-50%);
+      pointer-events: none;
+    }
+
+    /* Heure affichée au-dessus du trait blanc (heure actuelle). */
+    .filtr-cursor-label {
+      position: absolute;
+      bottom: calc(100% + 3px);
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.6rem;
+      font-family: 'Orbitron', monospace;
+      color: #ffffff;
+      white-space: nowrap;
+      text-shadow: 0 0 4px rgba(255, 255, 255, 0.5);
     }
 
     .filtr-legend {
@@ -682,9 +743,9 @@
     }
 
     .btn-boost {
-      background: rgba(245, 158, 11, 0.15);
-      color: #f59e0b;
-      border-color: #f59e0b;
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+      border-color: #10b981;
     }
 
     .btn-stop-boost {
@@ -1057,10 +1118,25 @@
         </div>
       </div>
 
-      <div class="header-clock">
-        <div class="date"></div>
-        <div class="time"></div>
-        <div class="time-source time-source-none" id="timeSource">⚠ FALLBACK</div>
+      <div class="header-clock-row">
+        <div class="header-clock">
+          <div class="date"></div>
+          <div class="time"></div>
+          <div class="time-source time-source-none" id="timeSource">⚠ FALLBACK</div>
+        </div>
+
+        <a class="adafruit-badge" href="https://io.adafruit.com/Domophil/dashboards/filtration-piscine"
+           target="_blank" rel="noopener" title="Ouvrir les graphiques cloud Adafruit IO">
+          <svg class="adafruit-icon" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8">
+            <path d="M4 17a4 4 0 0 1 1.2-7.9 5.5 5.5 0 0 1 10.6-1.6A4.5 4.5 0 0 1 19.5 17H4z"/>
+            <path d="M9 21l3-4 3 4M12 17v4"/>
+          </svg>
+          <div class="adafruit-info">
+            <span class="adafruit-label">Graphiques</span>
+            <span class="adafruit-sub">Adafruit IO</span>
+          </div>
+        </a>
       </div>
     </div>
 
@@ -1129,7 +1205,9 @@
 
         <div class="filtr-timeline" id="filtTimeline">
           <div class="filtr-range" id="filtRange"></div>
-          <div class="filtr-cursor" id="filtCursor"></div>
+          <div class="filtr-cursor" id="filtCursor">
+            <span class="filtr-cursor-label" id="filtCursorLabel"></span>
+          </div>
           <div class="filtr-endline" id="filtEnd">
             <span class="filtr-endlabel" id="filtEndLabel"></span>
           </div>

@@ -40,6 +40,7 @@ pub struct EtatCapteurs {
     pub demande_rearmement_moteur: bool, // mis à `true` par la route web, consommé par la boucle principale
     pub anti_gel: bool,
     pub canicule: bool,
+    pub pcf8574_injoignable: bool, // écriture relais pompe/défaut système en échec (composant absent ou en panne)
 
     // --- Marche forcée (boost) — disponible en mode AUTO uniquement ---
     pub boost_actif: bool,
@@ -103,6 +104,7 @@ impl Default for EtatCapteurs {
             demande_rearmement_moteur: false,
             anti_gel: false,
             canicule: false,
+            pcf8574_injoignable: false,
             boost_actif: false,
             boost_restant_secondes: 0,
             boost_marche_forcee: false,

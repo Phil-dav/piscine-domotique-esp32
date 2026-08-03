@@ -14,14 +14,19 @@ pub struct NiveauEau {
     filtre: bool,
     cible: bool,
     depuis: Instant,
+    premiere_lecture: bool,
 }
 
 impl NiveauEau {
     pub fn nouveau() -> Self {
         NiveauEau {
+            // Valeurs de départ sans importance : écrasées par la vraie mesure dès
+            // le premier appel à `mettre_a_jour` (voir `premiere_lecture`), donc pas
+            // de fenêtre au démarrage où un manque d'eau réel serait ignoré.
             filtre: true,
             cible: true,
             depuis: Instant::now(),
+            premiere_lecture: true,
         }
     }
 
@@ -32,6 +37,18 @@ impl NiveauEau {
             brut = false;
         } else if valeur_brute > SEUIL_HAUT {
             brut = true;
+        }
+
+        if self.premiere_lecture {
+            // Première mesure réelle après le démarrage : on l'applique tout de
+            // suite, sans délai de confirmation ni supposition optimiste — ni trop
+            // prudent (bloquer sans raison), ni trop confiant (laisser tourner à
+            // sec le temps que le filtre anti-vaguelettes se stabilise).
+            self.cible = brut;
+            self.filtre = brut;
+            self.depuis = Instant::now();
+            self.premiere_lecture = false;
+            return self.filtre;
         }
 
         if brut != self.cible {

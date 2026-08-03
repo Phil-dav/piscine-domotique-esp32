@@ -28,6 +28,8 @@ use log::{info, warn};
 const DELAI_PAR_OPERATION: Duration = Duration::from_secs(3);
 const TAILLE_PILE: usize = 10240;
 const PROFONDEUR_FILE: usize = 32;
+const TENTATIVES_MAX: u32 = 3;
+const DELAI_ENTRE_TENTATIVES: Duration = Duration::from_secs(2);
 
 /// Un envoi vers Adafruit IO. Les champs `None` sont simplement omis (aucune
 /// requête n'est faite pour ce feed).
@@ -113,8 +115,31 @@ fn boucle_envoi(username: &str, cle: &str, groupe: &str, reception: Receiver<Mes
     while let Ok(mesures) = reception.recv() {
         let envois = mesures.envois();
         if !envois.is_empty() {
-            if let Err(e) = envoyer_groupe_bloquant(username, cle, groupe, &envois) {
-                warn!("Adafruit IO : échec de l'envoi groupé (ignoré) : {:?}", e);
+            // Une erreur réseau transitoire (Wi-Fi en pleine renégociation, etc.) ne doit
+            // pas faire perdre tout le paquet : quelques essais rapprochés avant
+            // d'abandonner. Sans conséquence sur la boucle principale ni le Task
+            // Watchdog puisqu'on est déjà dans le fil dédié.
+            let mut derniere_erreur = None;
+            let mut reussi = false;
+            for tentative in 1..=TENTATIVES_MAX {
+                match envoyer_groupe_bloquant(username, cle, groupe, &envois) {
+                    Ok(()) => {
+                        reussi = true;
+                        break;
+                    }
+                    Err(e) => {
+                        derniere_erreur = Some(e);
+                        if tentative < TENTATIVES_MAX {
+                            std::thread::sleep(DELAI_ENTRE_TENTATIVES);
+                        }
+                    }
+                }
+            }
+            if !reussi {
+                warn!(
+                    "Adafruit IO : échec de l'envoi groupé après {TENTATIVES_MAX} tentative(s) (ignoré) : {:?}",
+                    derniere_erreur
+                );
             }
         }
     }

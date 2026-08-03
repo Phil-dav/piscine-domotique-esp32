@@ -7,6 +7,7 @@ mod ds18b20;
 mod ecran;
 mod etat_partage;
 mod filtration_auto;
+mod filtre_mode;
 mod gps;
 mod historique_modes;
 mod journal;
@@ -65,6 +66,19 @@ fn raison_reset_texte(raison: ResetReason) -> &'static str {
         ResetReason::DeepSleep => "REVEIL_VEILLE",
         ResetReason::Unknown => "INCONNUE",
         _ => "AUTRE",
+    }
+}
+
+/// Valeur numérique du mode envoyée à Adafruit IO. Décalée à 2/3/4 (au lieu de
+/// 0/1/2) pour ne jamais chevaucher l'échelle 0/1 (arrêt/marche) de la pompe
+/// sur le même graphique — sinon impossible de distinguer "pompe en marche"
+/// de "mode manuel" quand les deux valent 1 (constaté par l'utilisateur le
+/// 30/07/2026 en comparant les deux courbes).
+fn mode_vers_valeur_cloud(mode: &etat_partage::Mode) -> u8 {
+    match mode {
+        etat_partage::Mode::Off => 2,
+        etat_partage::Mode::Manuel => 3,
+        etat_partage::Mode::Auto => 4,
     }
 }
 
@@ -152,7 +166,18 @@ fn main() -> anyhow::Result<()> {
 
     FreeRtos::delay_ms(100);
 
-    let mut sorties = pcf8574::init(&i2c_partage)?;
+    // Non bloquant : un PCF8574 injoignable au démarrage (composant absent ou en panne)
+    // ne doit pas empêcher le reste du programme (Wi-Fi, dashboard, autres capteurs) de
+    // démarrer. `Sorties::default()` correspond à l'état que `init` aurait écrit en cas
+    // de succès (tout inactif) — la pompe et le relais défaut restent commandés à
+    // l'arrêt côté logiciel, prêts à être réappliqués dès que le composant répond.
+    let mut sorties = pcf8574::init(&i2c_partage).unwrap_or_else(|e| {
+        warn!(
+            "PCF8574 : initialisation échouée, composant absent ou injoignable : {:?}",
+            e
+        );
+        pcf8574::Sorties::default()
+    });
 
     let interface = I2CDisplayInterface::new(RefCellDevice::new(&i2c_partage));
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
@@ -199,30 +224,45 @@ fn main() -> anyhow::Result<()> {
     let mut _server = None;
 
     if config::WIFI_ACTIF {
-        let w = wifi::connecter(peripherals.modem, sys_loop, nvs)?;
-        // Synchronisation horaire de secours (utilisée seulement si le GPS n'a pas de fix frais).
-        sntp = Some(EspSntp::new_default()?);
+        // Non bloquant : avant ce correctif, un échec de connexion au tout premier
+        // démarrage (réseau introuvable, mauvais mot de passe, box en panne) arrêtait
+        // tout le programme via `?` — donc plus de pompe, plus de sécurités, plus
+        // d'écran, alors qu'aucune de ces fonctions ne dépend du Wi-Fi. `wifi` reste
+        // `Option<...>` et le reste du programme sait déjà gérer son absence (boucle
+        // principale, reconnexion, dashboard) — seul ce point d'entrée restait fatal.
+        match wifi::connecter(peripherals.modem, sys_loop, nvs) {
+            Ok(w) => {
+                // Synchronisation horaire de secours (utilisée seulement si le GPS n'a pas de fix frais).
+                sntp = Some(EspSntp::new_default()?);
 
-        let ip_info = w.wifi().sta_netif().get_ip_info()?;
-        ip_texte = ip_info.ip.to_string();
+                let ip_info = w.wifi().sta_netif().get_ip_info()?;
+                ip_texte = ip_info.ip.to_string();
 
-        if ecran_disponible {
-            if let Err(e) =
-                ecran::afficher_connecte(&mut display, &ip_texte, w.wifi().get_rssi().ok())
-            {
-                warn!("Écran OLED : erreur d'affichage (ignorée) : {:?}", e);
-            } else if let Err(e) = display.flush() {
-                warn!("Écran OLED : erreur de flush (ignorée) : {:?}", e);
+                if ecran_disponible {
+                    if let Err(e) =
+                        ecran::afficher_connecte(&mut display, &ip_texte, w.wifi().get_rssi().ok())
+                    {
+                        warn!("Écran OLED : erreur d'affichage (ignorée) : {:?}", e);
+                    } else if let Err(e) = display.flush() {
+                        warn!("Écran OLED : erreur de flush (ignorée) : {:?}", e);
+                    }
+                }
+
+                {
+                    let mut donnees = etat.lock();
+                    donnees.wifi_connecte = true;
+                    donnees.wifi_ip = Some(ip_texte.clone());
+                }
+                _server = Some(web_server::demarrer(etat.clone(), journal.clone())?);
+                wifi = Some(w);
+            }
+            Err(e) => {
+                warn!(
+                    "Wi-Fi : connexion initiale échouée, démarrage sans Wi-Fi (aucun impact sur la pompe/les sécurités) : {:?}",
+                    e
+                );
             }
         }
-
-        {
-            let mut donnees = etat.lock();
-            donnees.wifi_connecte = true;
-            donnees.wifi_ip = Some(ip_texte.clone());
-        }
-        _server = Some(web_server::demarrer(etat.clone(), journal.clone())?);
-        wifi = Some(w);
     } else {
         warn!("Wi-Fi désactivé (config::WIFI_ACTIF = false) : test temporaire, pas de serveur web, pas de synchro NTP, heure GPS uniquement.");
     }
@@ -242,6 +282,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut securite_moteur = securite::SecuriteMoteur::nouveau();
     let mut niveau_eau = niveau_eau::NiveauEau::nouveau();
+    let mut filtre_mode = filtre_mode::FiltreMode::nouveau();
     let mut pompe = pompe::GestionPompe::nouveau();
     let mut filtration_auto = filtration_auto::FiltrationAuto::nouveau(&stockage);
     let mut boost = boost::Boost::nouveau(stockage.lire_u32(CLE_BOOST_MIN, 60));
@@ -255,7 +296,7 @@ fn main() -> anyhow::Result<()> {
 
     // Journal : suivi des sessions pompe (début/fin) et des alertes (front montant
     // de chaque condition), pour alimenter le bilan journalier.
-    let mut session_debut: Option<(String, Instant)> = None;
+    let mut session_debut: Option<(String, String, Instant)> = None;
     let mut pompe_precedent = false;
     // Détecte un changement d'état pompe pendant le bloc journal (verrouillé) ;
     // consommé juste après, une fois le verrou relâché, pour envoyer vers Adafruit IO
@@ -271,7 +312,14 @@ fn main() -> anyhow::Result<()> {
     let mut pompe_bloquee_precedent = false;
     let mut anti_gel_precedent = false;
     let mut canicule_precedent = false;
+    let mut pcf8574_ok_precedent = true;
     let mut alertes_jour: u32 = 0;
+    // Au tout premier tour, les drapeaux "_precedent" ci-dessus valent tous `false`
+    // par défaut, alors que l'état réel (ex. canicule déjà en cours avant un
+    // redémarrage) peut déjà être vrai. Sans ce garde-fou, ça se lirait comme un
+    // nouveau front montant et déclencherait une alerte en double juste après un
+    // redémarrage à chaud, pour une condition qui n'a en réalité jamais cessé.
+    let mut premier_tour_alertes = true;
 
     // Redémarrage : journalisé une seule fois, dès que l'heure locale est fiable
     // (nécessaire pour estimer la durée d'arrêt via l'horodatage sauvegardé en NVS).
@@ -335,6 +383,15 @@ fn main() -> anyhow::Result<()> {
     // connexion réelle se fait en tâche de fond, sans jamais geler la boucle principale.
     const INTERVALLE_WIFI: Duration = Duration::from_secs(30);
     let mut dernier_controle_wifi = Instant::now();
+    // Si la reconnexion "douce" (`connect()`) échoue ce nombre de fois de suite sans
+    // jamais réussir (10 x 30 s = 5 min), la puce Wi-Fi est probablement restée bloquée
+    // dans un état dont un simple `connect()` ne peut pas la sortir (observé le
+    // 01/08/2026 : réseau sain sur d'autres appareils, mais la carte est restée
+    // injoignable près de 3 h sans jamais se reconnecter seule). On passe alors à un
+    // arrêt/relance complet du pilote Wi-Fi, plus radical mais toujours rapide (pas
+    // d'attente de négociation complète, donc pas de risque pour le Task Watchdog).
+    const ECHECS_AVANT_RESET_PILOTE: u32 = 10;
+    let mut echecs_reconnexion_consecutifs: u32 = 0;
 
     // Envoi périodique des mesures vers Adafruit IO (cloud gratuit) : toutes les 5
     // minutes suffit largement (l'eau/l'air ne varient pas vite).
@@ -388,7 +445,7 @@ fn main() -> anyhow::Result<()> {
         let derniere_temperature_eau = sonde_eau.mettre_a_jour(&mut one_wire, &mut delay);
         let sonde_muette = sonde_eau.muette();
 
-        let mode_physique = match pcf8574::lire_mode(&i2c_partage) {
+        let mode_physique = filtre_mode.mettre_a_jour(match pcf8574::lire_mode(&i2c_partage) {
             Ok(m) => m,
             Err(e) => {
                 warn!(
@@ -397,7 +454,7 @@ fn main() -> anyhow::Result<()> {
                 );
                 etat.lock().mode.clone()
             }
-        };
+        });
         // Réarmement manuel demandé depuis la page web ?
         let demande_reset = {
             let mut donnees = etat.lock();
@@ -793,8 +850,16 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        pcf8574::piloter_pompe(&mut sorties, &i2c_partage, pompe.etat())?;
-        pcf8574::piloter_defaut_systeme(&mut sorties, &i2c_partage, !systeme_sur)?;
+        // Non bloquant, comme l'initialisation : un échec d'écriture (composant
+        // injoignable) ne doit pas arrêter tout le programme. Retenté automatiquement
+        // au tour suivant (~20 ms plus tard) tant que la condition persiste — absorbe
+        // un glitch I2C transitoire sans jamais interrompre Wi-Fi/dashboard/sécurités.
+        // Front montant/descendant journalisé comme les autres alertes, juste après.
+        let resultat_ecriture_pompe =
+            pcf8574::piloter_pompe(&mut sorties, &i2c_partage, pompe.etat());
+        let resultat_ecriture_defaut =
+            pcf8574::piloter_defaut_systeme(&mut sorties, &i2c_partage, !systeme_sur);
+        let pcf8574_ok = resultat_ecriture_pompe.is_ok() && resultat_ecriture_defaut.is_ok();
 
         // --- Journal : sessions pompe (début/fin) + alertes (front montant de chaque
         // condition), persistés en NVS (historique borné, voir journal.rs). ---
@@ -808,10 +873,10 @@ fn main() -> anyhow::Result<()> {
                 pompe_transition = Some(etat_pompe);
             }
             if etat_pompe && !pompe_precedent {
-                session_debut = Some((heure_ref.to_string(), maintenant));
+                session_debut = Some((date_ref.to_string(), heure_ref.to_string(), maintenant));
             }
             if !etat_pompe && pompe_precedent {
-                if let Some((debut_str, debut_instant)) = session_debut.take() {
+                if let Some((date_debut, debut_str, debut_instant)) = session_debut.take() {
                     let duree_min = maintenant.duration_since(debut_instant).as_secs() as i64 / 60;
                     // Cause approximative (pas de suivi précis du motif comme dans le C++) :
                     // priorité à la sécurité, sinon boost encore actif (force l'arrêt), sinon normal.
@@ -823,7 +888,11 @@ fn main() -> anyhow::Result<()> {
                         "NORMAL"
                     };
                     jrn.enregistrer_session(journal::SessionTerminee {
-                        date: date_ref,
+                        // Date de DÉBUT de session, pas de fin : une session commencée avant
+                        // minuit et terminée après doit rester rattachée à la journée où elle
+                        // a débuté, sinon l'heure de début affichée (ex. 23:50) semble
+                        // incohérente avec la date du lendemain.
+                        date: &date_debut,
                         debut: &debut_str,
                         fin: heure_ref,
                         duree_min,
@@ -836,48 +905,74 @@ fn main() -> anyhow::Result<()> {
             }
             pompe_precedent = etat_pompe;
 
-            if !niveau_ok && niveau_ok_precedent {
-                jrn.enregistrer_alerte(date_ref, heure_ref, "NIVEAU_EAU", "BAS");
-                alertes_jour += 1;
-            }
-            niveau_ok_precedent = niveau_ok;
+            if premier_tour_alertes {
+                // Premier tour : on aligne juste les drapeaux sur l'état réel actuel,
+                // sans journaliser — ce n'est pas un vrai front montant, seulement la
+                // découverte de l'état au démarrage (voir commentaire à la déclaration).
+                niveau_ok_precedent = niveau_ok;
+                securite_actif_precedent = securite_moteur.actif();
+                sonde_muette_precedente = sonde_muette;
+                pompe_bloquee_precedent = pompe.bloquee();
+                anti_gel_precedent = filtration_auto.anti_gel_actif();
+                canicule_precedent = filtration_auto.canicule_actif();
+                pcf8574_ok_precedent = pcf8574_ok;
+                premier_tour_alertes = false;
+            } else {
+                if !pcf8574_ok && pcf8574_ok_precedent {
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "PCF8574_INJOIGNABLE", "-");
+                    alertes_jour += 1;
+                    warn!(
+                        "PCF8574 : composant injoignable (pompe:{:?}, défaut système:{:?}) — nouvel essai à chaque tour",
+                        resultat_ecriture_pompe, resultat_ecriture_defaut
+                    );
+                } else if pcf8574_ok && !pcf8574_ok_precedent {
+                    info!("PCF8574 : composant de nouveau joignable");
+                }
+                pcf8574_ok_precedent = pcf8574_ok;
 
-            if securite_moteur.actif() && !securite_actif_precedent {
-                let valeur = if securite_moteur.verrouille() {
-                    "VERROUILLE"
-                } else {
-                    "DEFAUT"
-                };
-                jrn.enregistrer_alerte(date_ref, heure_ref, "DEFAUT_MOTEUR", valeur);
-                alertes_jour += 1;
-            }
-            securite_actif_precedent = securite_moteur.actif();
+                if !niveau_ok && niveau_ok_precedent {
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "NIVEAU_EAU", "BAS");
+                    alertes_jour += 1;
+                }
+                niveau_ok_precedent = niveau_ok;
 
-            if sonde_muette && !sonde_muette_precedente {
-                jrn.enregistrer_alerte(date_ref, heure_ref, "SONDE_EAU_MUETTE", "-");
-                alertes_jour += 1;
-            }
-            sonde_muette_precedente = sonde_muette;
+                if securite_moteur.actif() && !securite_actif_precedent {
+                    let valeur = if securite_moteur.verrouille() {
+                        "VERROUILLE"
+                    } else {
+                        "DEFAUT"
+                    };
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "DEFAUT_MOTEUR", valeur);
+                    alertes_jour += 1;
+                }
+                securite_actif_precedent = securite_moteur.actif();
 
-            if pompe.bloquee() && !pompe_bloquee_precedent {
-                jrn.enregistrer_alerte(date_ref, heure_ref, "CLAQUEMENT", "-");
-                alertes_jour += 1;
-            }
-            pompe_bloquee_precedent = pompe.bloquee();
+                if sonde_muette && !sonde_muette_precedente {
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "SONDE_EAU_MUETTE", "-");
+                    alertes_jour += 1;
+                }
+                sonde_muette_precedente = sonde_muette;
 
-            if filtration_auto.anti_gel_actif() && !anti_gel_precedent {
-                let valeur = format!("{:.1}", derniere_temperature_eau.unwrap_or(f32::NAN));
-                jrn.enregistrer_alerte(date_ref, heure_ref, "ANTI_GEL", &valeur);
-                alertes_jour += 1;
-            }
-            anti_gel_precedent = filtration_auto.anti_gel_actif();
+                if pompe.bloquee() && !pompe_bloquee_precedent {
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "CLAQUEMENT", "-");
+                    alertes_jour += 1;
+                }
+                pompe_bloquee_precedent = pompe.bloquee();
 
-            if filtration_auto.canicule_actif() && !canicule_precedent {
-                let valeur = format!("{:.1}", derniere_temperature_eau.unwrap_or(f32::NAN));
-                jrn.enregistrer_alerte(date_ref, heure_ref, "CANICULE", &valeur);
-                alertes_jour += 1;
+                if filtration_auto.anti_gel_actif() && !anti_gel_precedent {
+                    let valeur = format!("{:.1}", derniere_temperature_eau.unwrap_or(f32::NAN));
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "ANTI_GEL", &valeur);
+                    alertes_jour += 1;
+                }
+                anti_gel_precedent = filtration_auto.anti_gel_actif();
+
+                if filtration_auto.canicule_actif() && !canicule_precedent {
+                    let valeur = format!("{:.1}", derniere_temperature_eau.unwrap_or(f32::NAN));
+                    jrn.enregistrer_alerte(date_ref, heure_ref, "CANICULE", &valeur);
+                    alertes_jour += 1;
+                }
+                canicule_precedent = filtration_auto.canicule_actif();
             }
-            canicule_precedent = filtration_auto.canicule_actif();
         }
 
         let wifi_connecte = wifi
@@ -896,28 +991,35 @@ fn main() -> anyhow::Result<()> {
                     humidite: derniere_humidite,
                     batterie: tension_batterie,
                     sortie_5v: tension_sortie_5v,
-                    ..Default::default()
+                    // Rappel périodique de l'état pompe/mode (en plus de l'envoi
+                    // immédiat ci-dessous) : sans ça, un état stable pendant des
+                    // heures ne laisse aucun point sur le graphique Adafruit IO
+                    // entre deux changements, ce qui ressemble à un trou de
+                    // données plutôt qu'à un état maintenu (relevé par
+                    // l'utilisateur le 30/07/2026). Un point redondant de temps
+                    // en temps ne coûte rien : toujours un seul paquet groupé,
+                    // et invisible sur un graphique en ligne continue (pas de
+                    // marqueurs par point).
+                    pompe: Some(pompe.etat()),
+                    mode: Some(mode_vers_valeur_cloud(&mode_physique)),
                 });
             }
         }
 
-        // État pompe et mode vers Adafruit IO : uniquement à chaque changement (pas
-        // toutes les 5 min comme les températures), pour un signal en créneaux net —
-        // mais jamais plus vite que `DELAI_MIN_EVENEMENT`. Si le Wi-Fi est
-        // indisponible, ou que le délai minimum n'est pas encore écoulé, l'événement
-        // reste simplement en attente (`.take()` non consommé) et partira dès que les
-        // deux conditions seront réunies, avec la valeur la plus récente si l'état a
-        // changé plusieurs fois entre-temps.
+        // État pompe et mode vers Adafruit IO : envoi immédiat à chaque changement
+        // (en plus du rappel périodique ci-dessus), pour une réaction instantanée
+        // sur le graphique plutôt que d'attendre jusqu'à 5 min — mais jamais plus
+        // vite que `DELAI_MIN_EVENEMENT`. Si le Wi-Fi est indisponible, ou que le
+        // délai minimum n'est pas encore écoulé, l'événement reste simplement en
+        // attente (`.take()` non consommé) et partira dès que les deux conditions
+        // seront réunies, avec la valeur la plus récente si l'état a changé
+        // plusieurs fois entre-temps.
         if wifi_connecte
             && (pompe_transition.is_some() || mode_transition.is_some())
             && maintenant.duration_since(dernier_envoi_evenement) >= DELAI_MIN_EVENEMENT
         {
             let nouvel_etat_pompe = pompe_transition.take();
-            let nouveau_mode = mode_transition.take().map(|m| match m {
-                etat_partage::Mode::Off => 0,
-                etat_partage::Mode::Manuel => 1,
-                etat_partage::Mode::Auto => 2,
-            });
+            let nouveau_mode = mode_transition.take().map(|m| mode_vers_valeur_cloud(&m));
             dernier_envoi_evenement = maintenant;
             if config::ADAFRUIT_IO_ACTIF {
                 expediteur_adafruit.envoyer(adafruit_io::Mesures {
@@ -931,11 +1033,32 @@ fn main() -> anyhow::Result<()> {
         // Reconnexion Wi-Fi automatique si la connexion a été perdue (coupure routeur,
         // portée...) — auparavant, une perte de Wi-Fi était définitive jusqu'au reboot.
         // Absente si le Wi-Fi est désactivé (`config::WIFI_ACTIF = false`, test temporaire).
-        if let Some(w) = wifi.as_mut() {
-            if !wifi_connecte && maintenant.duration_since(dernier_controle_wifi) >= INTERVALLE_WIFI
-            {
+        if wifi_connecte {
+            echecs_reconnexion_consecutifs = 0;
+        } else if let Some(w) = wifi.as_mut() {
+            if maintenant.duration_since(dernier_controle_wifi) >= INTERVALLE_WIFI {
                 dernier_controle_wifi = maintenant;
-                warn!("Wi-Fi déconnecté, tentative de reconnexion...");
+                echecs_reconnexion_consecutifs += 1;
+
+                if echecs_reconnexion_consecutifs >= ECHECS_AVANT_RESET_PILOTE {
+                    warn!(
+                        "Wi-Fi : {} échecs de reconnexion consécutifs, réinitialisation complète du pilote...",
+                        echecs_reconnexion_consecutifs
+                    );
+                    if let Err(e) = w.wifi_mut().stop() {
+                        warn!("Wi-Fi : échec de l'arrêt du pilote : {:?}", e);
+                    }
+                    if let Err(e) = w.wifi_mut().start() {
+                        warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
+                    }
+                    echecs_reconnexion_consecutifs = 0;
+                } else {
+                    warn!(
+                        "Wi-Fi déconnecté, tentative de reconnexion... ({}/{})",
+                        echecs_reconnexion_consecutifs, ECHECS_AVANT_RESET_PILOTE
+                    );
+                }
+
                 if let Err(e) = w.wifi_mut().connect() {
                     warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
                 }
@@ -1082,6 +1205,7 @@ fn main() -> anyhow::Result<()> {
             donnees.pompe_heures_aujourdhui = pompe.heures_aujourdhui();
             donnees.anti_gel = filtration_auto.anti_gel_actif();
             donnees.canicule = filtration_auto.canicule_actif();
+            donnees.pcf8574_injoignable = !pcf8574_ok;
             donnees.filt_objectif_heures = heures_cibles;
             donnees.filt_debut_effectif = plage_debut;
             donnees.filt_fin_effective = plage_fin;

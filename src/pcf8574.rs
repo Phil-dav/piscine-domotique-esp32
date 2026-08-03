@@ -29,6 +29,16 @@ pub struct Sorties {
     octet: u8,
 }
 
+impl Default for Sorties {
+    /// Toutes les sorties inactives (P0-P3 à 1, LOW = actif) — l'état qu'`init` écrit
+    /// normalement sur le composant. Sert de secours si le PCF8574 est injoignable au
+    /// démarrage : la pompe et le relais défaut restent commandés "inactif" côté
+    /// logiciel, prêts à être réappliqués dès que le composant répond.
+    fn default() -> Self {
+        Sorties { octet: 0xFF }
+    }
+}
+
 impl Sorties {
     fn appliquer(
         &mut self,
