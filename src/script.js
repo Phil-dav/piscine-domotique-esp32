@@ -39,7 +39,10 @@ function fetchAllData() {
   if (isFetching) return;
   isFetching = true;
 
-  fetch('/sensors')
+  const controleurTimeout = new AbortController();
+  const delaiTimeout = setTimeout(() => controleurTimeout.abort(), 8000);
+
+  fetch('/sensors', { signal: controleurTimeout.signal })
     .then(response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response.json();
@@ -244,6 +247,7 @@ function fetchAllData() {
       }
     })
     .finally(() => {
+      clearTimeout(delaiTimeout);
       isFetching = false;
     });
 }

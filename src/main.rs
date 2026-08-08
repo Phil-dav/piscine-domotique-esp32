@@ -16,6 +16,7 @@ mod pcf8574;
 mod pompe;
 mod securite;
 mod stockage;
+mod surveillance_reseau;
 mod temps;
 mod web_server;
 mod wifi;
@@ -93,7 +94,10 @@ fn main() -> anyhow::Result<()> {
     // cette info reflète encore le redémarrage qui vient de se produire.
     let raison_reset = ResetReason::get();
 
-    info!("Démarrage du programme");
+    info!(
+        "Démarrage du programme — firmware v{}",
+        config::VERSION_FIRMWARE
+    );
 
     let debut_programme = Instant::now();
 
@@ -267,6 +271,21 @@ fn main() -> anyhow::Result<()> {
         warn!("Wi-Fi désactivé (config::WIFI_ACTIF = false) : test temporaire, pas de serveur web, pas de synchro NTP, heure GPS uniquement.");
     }
 
+    // Sonde de joignabilité réelle (ping périodique de la passerelle). Démarrée même
+    // si la connexion initiale a échoué : elle reste inerte tant qu'aucune passerelle
+    // ne lui est fournie, et se mettra à travailler dès la première connexion réussie.
+    let sonde_reseau = if config::WIFI_ACTIF {
+        match surveillance_reseau::Sonde::demarrer() {
+            Ok(s) => Some(s),
+            Err(e) => {
+                warn!("Sonde réseau : démarrage impossible (surveillance désactivée) : {e:?}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Dernières valeurs valides : conservées telles quelles en cas d'échec de lecture
     // ponctuel, plutôt que d'afficher une valeur manquante côté dashboard.
     let mut derniere_temperature_air: Option<f32> = None;
@@ -392,6 +411,19 @@ fn main() -> anyhow::Result<()> {
     // d'attente de négociation complète, donc pas de risque pour le Task Watchdog).
     const ECHECS_AVANT_RESET_PILOTE: u32 = 10;
     let mut echecs_reconnexion_consecutifs: u32 = 0;
+
+    // « Zombie Wi-Fi » : associé au point d'accès, IP valide, mais plus aucun paquet
+    // ne circule (incident du 08/08/2026, voir `surveillance_reseau.rs`). Le bloc de
+    // reconnexion ci-dessus ne peut rien : il ne s'exécute que si l'association est
+    // perdue, ce qui n'est justement pas le cas ici. Seule la sonde active détecte
+    // cet état, et l'escalade se fait en deux temps.
+    const SANS_JOIGNABILITE_AVANT_RESET: Duration = Duration::from_secs(5 * 60);
+    // Dernier recours si même le reset du pilote ne rétablit rien : redémarrage complet,
+    // exactement le geste qui a rétabli le service manuellement le 08/08/2026. La pompe
+    // est coupée le temps du redémarrage (~8 s) puis repilotée normalement — les compteurs
+    // du jour et la timeline sont en NVS, ils survivent au redémarrage.
+    const SANS_JOIGNABILITE_AVANT_REBOOT: Duration = Duration::from_secs(15 * 60);
+    let mut dernier_reset_zombie = Instant::now();
 
     // Envoi périodique des mesures vers Adafruit IO (cloud gratuit) : toutes les 5
     // minutes suffit largement (l'eau/l'air ne varient pas vite).
@@ -975,10 +1007,24 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        let wifi_connecte = wifi
+        // Santé du Wi-Fi. `is_connected()` ne reflète QUE l'association 802.11 : c'est
+        // un drapeau alimenté par les événements du pilote, il ne prouve pas qu'un
+        // paquet circule. `is_up()` y ajoute l'état de l'interface réseau, et on exige
+        // en plus qu'une IP soit réellement attribuée — sans quoi la carte peut se
+        // croire connectée alors que rien ne passe (incident du 08/08/2026, détaillé
+        // dans `surveillance_reseau.rs`).
+        let ip_info = wifi
             .as_ref()
-            .is_some_and(|w| w.is_connected().unwrap_or(false));
+            .and_then(|w| w.wifi().sta_netif().get_ip_info().ok());
+        let ip_attribuee = ip_info.as_ref().is_some_and(|i| !i.ip.is_unspecified());
+        let wifi_connecte =
+            wifi.as_ref().is_some_and(|w| w.is_up().unwrap_or(false)) && ip_attribuee;
         let wifi_rssi = wifi.as_ref().and_then(|w| w.wifi().get_rssi().ok());
+
+        // La sonde de joignabilité a besoin de la passerelle du réseau courant.
+        if let (Some(sonde), Some(info)) = (sonde_reseau.as_ref(), ip_info.as_ref()) {
+            sonde.definir_passerelle(info.subnet.gateway);
+        }
 
         if wifi_connecte
             && maintenant.duration_since(dernier_envoi_periodique) >= INTERVALLE_ENVOI_CLOUD
@@ -1051,6 +1097,7 @@ fn main() -> anyhow::Result<()> {
                     if let Err(e) = w.wifi_mut().start() {
                         warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
                     }
+                    wifi::desactiver_economie_energie();
                     echecs_reconnexion_consecutifs = 0;
                 } else {
                     warn!(
@@ -1061,6 +1108,57 @@ fn main() -> anyhow::Result<()> {
 
                 if let Err(e) = w.wifi_mut().connect() {
                     warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
+                }
+            }
+        }
+
+        // --- Chien de garde « zombie Wi-Fi » ---
+        // Associé, IP valide, et pourtant plus rien ne circule. Le bloc de reconnexion
+        // ci-dessus est inopérant dans ce cas : il ne s'exécute que si l'association est
+        // perdue, ce qui n'est justement pas le cas. Seule la sonde active le détecte.
+        //
+        // Garde-fou essentiel : tant que la sonde n'a JAMAIS réussi un seul ping depuis
+        // le démarrage (`None`), on ne fait rien du tout. Une passerelle qui ignore
+        // l'ICMP ne doit surtout pas provoquer des redémarrages en boucle.
+        if wifi_connecte {
+            if let Some(depuis) = sonde_reseau
+                .as_ref()
+                .and_then(|s| s.depuis_dernier_succes())
+            {
+                let minutes = depuis.as_secs() / 60;
+                if depuis >= SANS_JOIGNABILITE_AVANT_REBOOT {
+                    warn!(
+                        "Réseau injoignable depuis {minutes} min malgré une association Wi-Fi valide : redémarrage complet."
+                    );
+                    journal.lock().enregistrer_alerte(
+                        date_texte.as_deref().unwrap_or("--/--/----"),
+                        heure_texte.as_deref().unwrap_or("--:--:--"),
+                        "RESEAU_ZOMBIE",
+                        &format!("injoignable {minutes} min, redemarrage"),
+                    );
+                    // Laisse le temps à l'écriture NVS du journal de se terminer.
+                    FreeRtos::delay_ms(200);
+                    unsafe { esp_idf_svc::sys::esp_restart() };
+                } else if depuis >= SANS_JOIGNABILITE_AVANT_RESET
+                    && maintenant.duration_since(dernier_reset_zombie)
+                        >= SANS_JOIGNABILITE_AVANT_RESET
+                {
+                    dernier_reset_zombie = maintenant;
+                    warn!(
+                        "Réseau injoignable depuis {minutes} min : réinitialisation du pilote Wi-Fi."
+                    );
+                    if let Some(w) = wifi.as_mut() {
+                        if let Err(e) = w.wifi_mut().stop() {
+                            warn!("Wi-Fi : échec de l'arrêt du pilote : {:?}", e);
+                        }
+                        if let Err(e) = w.wifi_mut().start() {
+                            warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
+                        }
+                        wifi::desactiver_economie_energie();
+                        if let Err(e) = w.wifi_mut().connect() {
+                            warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
+                        }
+                    }
                 }
             }
         }

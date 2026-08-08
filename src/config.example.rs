@@ -1,3 +1,8 @@
+// Version du firmware — repère simple pour confirmer qu'un téléversement a
+// bien pris, affiché une fois au démarrage. Incrémentée automatiquement par
+// Claude avant chaque flash (côté config.rs réel, pas ce gabarit).
+pub const VERSION_FIRMWARE: &str = "1.0";
+
 // Adresses I2C
 pub const AHT10_ADDR: u8 = 0x38;
 pub const PCF8574_ADDR: u8 = 0x21;

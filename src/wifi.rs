@@ -1,10 +1,39 @@
 use esp_idf_svc::eventloop::EspSystemEventLoop;
 use esp_idf_svc::hal::modem::Modem;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sys::{esp, esp_wifi_set_ps, wifi_ps_type_t_WIFI_PS_NONE};
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use log::info;
+use log::{info, warn};
 
 use crate::config::{WIFI_PASSWORD, WIFI_SSID};
+
+/// Désactive la veille modem du Wi-Fi.
+///
+/// ESP-IDF active par défaut `WIFI_PS_MIN_MODEM` en mode station : la puce radio
+/// s'endort entre deux balises de la box et ne se réveille que périodiquement.
+/// Les paquets qui arrivent pendant le sommeil sont mis en attente par la box,
+/// puis délivrés au réveil — un mécanisme fragile dès que le signal n'est pas
+/// excellent. Ici le signal tourne autour de -65 à -70 dBm, et cette remise en
+/// attente se perd régulièrement : la carte ne répond alors qu'après plusieurs
+/// retransmissions.
+///
+/// Mesuré depuis le PC le 08/08/2026, carte allumée depuis ~7 h :
+/// première requête 7,09 s, puis 0,09 s et 0,09 s une fois la puce tenue
+/// éveillée par le trafic. C'est exactement la « lenteur qui s'aggrave » quand
+/// le dashboard n'a pas été consulté depuis un moment.
+///
+/// Contrepartie : consommation moyenne plus élevée, la radio ne dort plus.
+/// Acceptable ici, la carte est alimentée en permanence (à reconsidérer si le
+/// projet passe un jour sur batterie/solaire).
+///
+/// À réappliquer après chaque `stop()`/`start()` du pilote : on ne suppose pas
+/// que le réglage survive à un cycle complet.
+pub fn desactiver_economie_energie() {
+    match esp!(unsafe { esp_wifi_set_ps(wifi_ps_type_t_WIFI_PS_NONE) }) {
+        Ok(()) => info!("Wi-Fi : veille modem désactivée (WIFI_PS_NONE)"),
+        Err(e) => warn!("Wi-Fi : impossible de désactiver la veille modem : {e:?}"),
+    }
+}
 
 /// Connecte l'ESP32 au réseau Wi-Fi configuré dans config.rs.
 /// Scanne d'abord le réseau pour détecter automatiquement son canal
@@ -19,6 +48,7 @@ pub fn connecter(
     // Démarrage minimal pour pouvoir scanner
     wifi.set_configuration(&Configuration::Client(ClientConfiguration::default()))?;
     wifi.start()?;
+    desactiver_economie_energie();
     info!("Wi-Fi démarré, recherche du réseau {}...", WIFI_SSID);
 
     let reseaux = wifi.scan()?;

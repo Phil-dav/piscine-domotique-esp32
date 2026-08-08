@@ -19,17 +19,27 @@
 //! boucle principale a déjà provoqué de vrais redémarrages).
 
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use embedded_svc::http::client::Client as ClientHttp;
 use esp_idf_svc::http::client::{Configuration as HttpConfiguration, EspHttpConnection};
 use log::{info, warn};
 
 const DELAI_PAR_OPERATION: Duration = Duration::from_secs(3);
-const TAILLE_PILE: usize = 10240;
+// Une pile TLS/HTTPS est gourmande — 10 Ko était déjà limite avant le recul
+// progressif ajouté ci-dessous (quelques variables de plus ont suffi à faire
+// déborder la pile, provoquant un plantage réel constaté le 05/08/2026).
+const TAILLE_PILE: usize = 20480;
 const PROFONDEUR_FILE: usize = 32;
 const TENTATIVES_MAX: u32 = 3;
 const DELAI_ENTRE_TENTATIVES: Duration = Duration::from_secs(2);
+
+/// Recul progressif après des échecs complets (les `TENTATIVES_MAX` essais
+/// tous échoués) qui se répètent — voir le commentaire de `boucle_envoi`
+/// pour le contexte (bug connu d'ESP-IDF en fonctionnement prolongé,
+/// espacer les tentatives réduit la pression plutôt que de la corriger).
+const RECUL_BASE: Duration = Duration::from_secs(5 * 60);
+const RECUL_MAX: Duration = Duration::from_secs(30 * 60);
 
 /// Un envoi vers Adafruit IO. Les champs `None` sont simplement omis (aucune
 /// requête n'est faite pour ce feed).
@@ -111,36 +121,68 @@ impl Expediteur {
 /// Boucle du fil dédié : envoie toutes les mesures présentes en une seule
 /// requête groupée. Non surveillé par le Task Watchdog, peut bloquer sur le
 /// réseau sans conséquence pour le reste du programme.
+///
+/// Recul progressif après des échecs complets qui se répètent : un bug connu
+/// d'ESP-IDF en fonctionnement prolongé (voir espressif/esp-idf#8953,
+/// `getaddrinfo() returns 202`) peut dégrader la pile réseau après des
+/// centaines de tentatives répétées. On ne peut pas corriger ce bug (il est
+/// dans la bibliothèque C d'Espressif, en dessous de notre code), mais on
+/// peut réduire la pression dessus en espaçant les tentatives suivantes
+/// plutôt que de marteler toutes les 5 minutes sans arrêt pendant une panne
+/// prolongée.
 fn boucle_envoi(username: &str, cle: &str, groupe: &str, reception: Receiver<Mesures>) {
+    let mut echecs_consecutifs: u32 = 0;
+    let mut prochaine_tentative_au_plus_tot = Instant::now();
+
     while let Ok(mesures) = reception.recv() {
         let envois = mesures.envois();
-        if !envois.is_empty() {
-            // Une erreur réseau transitoire (Wi-Fi en pleine renégociation, etc.) ne doit
-            // pas faire perdre tout le paquet : quelques essais rapprochés avant
-            // d'abandonner. Sans conséquence sur la boucle principale ni le Task
-            // Watchdog puisqu'on est déjà dans le fil dédié.
-            let mut derniere_erreur = None;
-            let mut reussi = false;
-            for tentative in 1..=TENTATIVES_MAX {
-                match envoyer_groupe_bloquant(username, cle, groupe, &envois) {
-                    Ok(()) => {
-                        reussi = true;
-                        break;
-                    }
-                    Err(e) => {
-                        derniere_erreur = Some(e);
-                        if tentative < TENTATIVES_MAX {
-                            std::thread::sleep(DELAI_ENTRE_TENTATIVES);
-                        }
+        if envois.is_empty() {
+            continue;
+        }
+
+        if echecs_consecutifs > 0 && Instant::now() < prochaine_tentative_au_plus_tot {
+            // En recul suite à des échecs répétés : cette mesure est perdue
+            // (pas de file d'attente pour rattraper), la suivante sera
+            // retentée normalement une fois le recul écoulé.
+            continue;
+        }
+
+        // Une erreur réseau transitoire (Wi-Fi en pleine renégociation, etc.) ne doit
+        // pas faire perdre tout le paquet : quelques essais rapprochés avant
+        // d'abandonner. Sans conséquence sur la boucle principale ni le Task
+        // Watchdog puisqu'on est déjà dans le fil dédié.
+        let mut derniere_erreur = None;
+        let mut reussi = false;
+        for tentative in 1..=TENTATIVES_MAX {
+            match envoyer_groupe_bloquant(username, cle, groupe, &envois) {
+                Ok(()) => {
+                    reussi = true;
+                    break;
+                }
+                Err(e) => {
+                    derniere_erreur = Some(e);
+                    if tentative < TENTATIVES_MAX {
+                        std::thread::sleep(DELAI_ENTRE_TENTATIVES);
                     }
                 }
             }
-            if !reussi {
-                warn!(
-                    "Adafruit IO : échec de l'envoi groupé après {TENTATIVES_MAX} tentative(s) (ignoré) : {:?}",
-                    derniere_erreur
-                );
-            }
+        }
+
+        if reussi {
+            echecs_consecutifs = 0;
+        } else {
+            echecs_consecutifs += 1;
+            // Doublement à chaque échec complet supplémentaire, plafonné à RECUL_MAX :
+            // 1er échec -> 5 min avant la prochaine tentative, puis 10, 20, 30 (plafond)...
+            let recul = RECUL_BASE
+                .saturating_mul(1 << echecs_consecutifs.saturating_sub(1).min(4))
+                .min(RECUL_MAX);
+            prochaine_tentative_au_plus_tot = Instant::now() + recul;
+            let secondes_recul = recul.as_secs();
+            warn!(
+                "Adafruit IO : echec apres {} tentative(s), {} echec(s) consecutif(s), prochain essai dans {} s : {:?}",
+                TENTATIVES_MAX, echecs_consecutifs, secondes_recul, derniere_erreur
+            );
         }
     }
     warn!("Adafruit IO : fil d'envoi terminé");
