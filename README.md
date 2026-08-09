@@ -84,9 +84,10 @@ qui sont déjà câblés mais **pas encore pris en charge par le firmware
 actuel** — schéma établi en amont de la réalisation, comme il est d'usage en
 électronique.
 
-Une [version vectorielle au format SVG](docs/Gestion%20filtration%20piscine.svg)
-est également disponible : elle se zoome sans perte de qualité, ce qui permet de
-lire les références et les valeurs des composants.
+Une [version vectorielle au format SVG](https://raw.githubusercontent.com/Phil-dav/piscine-domotique-esp32/main/docs/Gestion%20filtration%20piscine.svg)
+est également disponible. Elle s'ouvre en plein écran dans le navigateur et se
+zoome avec **Ctrl + molette** sans aucune perte de qualité, ce qui permet de lire
+les références et les valeurs de chaque composant.
 
 ## Organisation des fichiers
 
