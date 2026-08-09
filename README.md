@@ -78,10 +78,15 @@ l'interrupteur de mode (MANU/AUTO), P7 lit le retour de défaut moteur.
 
 ![Schéma électronique du montage](docs/schema-electronique.png)
 
-Schéma KiCad complet du montage. Il inclut deux blocs anticipés dans la
-conception (carte micro SD, interrupteur de logs série) qui sont déjà câblés
-mais **pas encore pris en charge par le firmware actuel** — schéma établi en
-amont de la réalisation, comme il est d'usage en électronique.
+Schéma KiCad complet du montage. Il inclut des blocs anticipés dans la
+conception (carte micro SD, pH-mètre PH-4502C, interrupteurs de logs série)
+qui sont déjà câblés mais **pas encore pris en charge par le firmware
+actuel** — schéma établi en amont de la réalisation, comme il est d'usage en
+électronique.
+
+Une [version vectorielle au format SVG](docs/Gestion%20filtration%20piscine.svg)
+est également disponible : elle se zoome sans perte de qualité, ce qui permet de
+lire les références et les valeurs des composants.
 
 ## Organisation des fichiers
 
