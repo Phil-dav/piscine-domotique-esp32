@@ -56,11 +56,3 @@ pub const LOGS_SERIE_ACTIFS: bool = true;
 /// Mettre à `false` pour désactiver complètement le Wi-Fi (pas de connexion, pas de
 /// serveur web, pas de synchro NTP).
 pub const WIFI_ACTIF: bool = true;
-
-/// Mettre à `true` pour servir le dashboard simplifié (température eau/air, humidité,
-/// GPS/position/Wi-Fi, lien vers les graphiques Adafruit IO — rien d'autre : pas de
-/// contrôle pompe, pas de mode, pas de journaux) au lieu du dashboard complet. Utile
-/// pour un montage identique installé ailleurs, dédié à la simple consultation par un
-/// tiers (ex. accès en lecture seule pour un proche). Aucune donnée capteur en moins
-/// côté firmware, seule l'interface web change.
-pub const DASHBOARD_SIMPLIFIE: bool = false;

@@ -10,20 +10,16 @@ use log::info;
 use crate::etat_partage::EtatPartage;
 use crate::journal::Journal;
 
-// Deux dashboards possibles, choisis à la compilation via `config::DASHBOARD_SIMPLIFIE` :
-// le complet (contrôle pompe, mode, filtration, journaux) ou une version allégée en
-// lecture seule (température eau/air, humidité, GPS/position/Wi-Fi) pour un montage
-// identique installé ailleurs, dédié à la simple consultation.
-const INDEX_HTML: &str = if crate::config::DASHBOARD_SIMPLIFIE {
-    include_str!("index_simple.html")
-} else {
-    include_str!("index.html")
-};
-const SCRIPT_JS: &str = if crate::config::DASHBOARD_SIMPLIFIE {
-    include_str!("script_simple.js")
-} else {
-    include_str!("script.js")
-};
+// Page et script du dashboard, embarqués dans le binaire à la compilation.
+//
+// Une variante allégée en lecture seule a existé jusqu'au 16/08/2026, sélectionnable par
+// une constante `DASHBOARD_SIMPLIFIE`. Elle était destinée à un second montage dédié à la
+// consultation, projet abandonné faute de destinataire — et elle posait un vrai problème :
+// deux contenus différents servis à la même adresse sous la même étiquette de version, ce
+// qui pouvait faire afficher le mauvais tableau de bord depuis le cache d'un navigateur.
+// Supprimée entièrement plutôt que laissée en sommeil.
+const INDEX_HTML: &str = include_str!("index.html");
+const SCRIPT_JS: &str = include_str!("script.js");
 
 /// Logo Phil Domo recadré en icône (64x64, ~4,6 Ko). Les navigateurs demandent
 /// automatiquement `/favicon.ico` (et parfois les icônes Apple) à chaque chargement de
@@ -34,7 +30,23 @@ const SCRIPT_JS: &str = if crate::config::DASHBOARD_SIMPLIFIE {
 /// pour les ressources qui comptent vraiment (page, script, données).
 const FAVICON: &[u8] = include_bytes!("favicon.png");
 
-/// Sert un contenu figé (la page, le script, l'icône) en évitant de le retransmettre
+/// Calcule l'étiquette `ETag` d'un contenu, sous forme d'empreinte de ses octets.
+///
+/// Algorithme FNV-1a 64 bits : quelques lignes, rapide, et amplement suffisant ici. On ne
+/// cherche pas à résister à une falsification, seulement à ce que **deux contenus
+/// différents donnent deux étiquettes différentes**. Calculé une fois au démarrage sur
+/// ~80 Ko, le coût est négligeable.
+fn etag_du_contenu(contenu: &[u8]) -> String {
+    let mut empreinte: u64 = 0xcbf2_9ce4_8422_2325;
+    for octet in contenu {
+        empreinte ^= *octet as u64;
+        empreinte = empreinte.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Les guillemets font partie de la syntaxe d'un ETag HTTP.
+    format!("\"{empreinte:016x}\"")
+}
+
+/// Sert un contenu figé (la page ou le script) en évitant de le retransmettre
 /// quand le navigateur l'a déjà.
 ///
 /// ## Le problème
@@ -47,8 +59,8 @@ const FAVICON: &[u8] = include_bytes!("favicon.png");
 ///
 /// ## Le mécanisme retenu — revalidation par `ETag`
 ///
-/// On envoie une étiquette de version (`ETag`) avec le contenu, et `no-cache`, qui ne veut
-/// pas dire « ne cache pas » mais « garde une copie, et demande-moi avant de t'en servir ».
+/// On envoie une étiquette (`ETag`) avec le contenu, et `no-cache`, qui ne veut pas dire
+/// « ne cache pas » mais « garde une copie, et demande-moi avant de t'en servir ».
 ///
 /// Au chargement suivant, le navigateur renvoie cette étiquette dans `If-None-Match`. Si
 /// elle correspond, on répond **304 Non modifié** sans aucun corps : environ 200 octets au
@@ -61,15 +73,34 @@ const FAVICON: &[u8] = include_bytes!("favicon.png");
 /// 02/08/2026, où des données figées ne se débloquaient qu'avec un rechargement forcé. La
 /// contourner demanderait un numéro de version dans chaque adresse, à maintenir à la main.
 ///
-/// Ici l'étiquette **est** la version du firmware : elle change toute seule à chaque flash,
-/// et le navigateur retélécharge automatiquement. Impossible de servir une page périmée.
+/// Ici l'étiquette est une **empreinte du contenu servi** (voir `etag_du_contenu`) : elle
+/// change dès que la page ou le script change, indépendamment du numéro de version. Le
+/// navigateur retélécharge donc automatiquement, sans qu'on ait à penser à quoi que ce soit.
+///
+/// Ce point a été corrigé le 16/08/2026 : la première version calculait l'étiquette depuis
+/// `VERSION_FIRMWARE`, ce qui reposait sur la discipline d'incrémenter la version avant
+/// chaque flash. Un oubli aurait figé le cache de tous les navigateurs de façon durable.
+///
+/// L'icône, elle, n'utilise pas ce mécanisme : elle garde un `max-age` de sept jours, qui
+/// ne coûte aucun aller-retour, et une icône périmée est sans conséquence.
 fn servir_contenu_fige(
     req: Request<&mut EspHttpConnection<'_>>,
     etag: &str,
     type_contenu: &str,
     corps: &[u8],
 ) -> Result<(), EspIOError> {
-    if req.header("If-None-Match") == Some(etag) {
+    // Comparaison tolérante : certains navigateurs et intermédiaires renvoient l'étiquette
+    // préfixée de `W/` (validateur « faible »), en séparent plusieurs par des virgules, ou
+    // envoient `*` pour dire « n'importe laquelle ». Une égalité stricte échouerait dans
+    // ces cas et retransmettrait les 80 Ko sans raison — sans casse, mais sans bénéfice.
+    let deja_a_jour = req.header("If-None-Match").is_some_and(|recu| {
+        recu.split(',').any(|candidat| {
+            let candidat = candidat.trim();
+            candidat == "*" || candidat.trim_start_matches("W/") == etag
+        })
+    });
+
+    if deja_a_jour {
         req.into_status_response(304)?;
         return Ok(());
     }
@@ -123,12 +154,21 @@ pub fn demarrer(
         ..Default::default()
     })?;
 
-    // Étiquette de version servant d'`ETag` aux contenus figés (page, script, icône).
-    // Construite une seule fois au démarrage, pas à chaque requête. Elle change à chaque
-    // flash puisqu'elle reprend `VERSION_FIRMWARE` : le navigateur retélécharge donc
-    // automatiquement après une mise à jour, sans qu'on ait rien à maintenir.
-    // Les guillemets font partie de la syntaxe d'un ETag HTTP.
-    let etag = format!("\"{}\"", crate::config::VERSION_FIRMWARE);
+    // Étiquettes `ETag` des contenus figés, calculées **depuis le contenu lui-même** et
+    // non depuis le numéro de version. Une seule fois au démarrage, pas à chaque requête.
+    //
+    // La première version utilisait `VERSION_FIRMWARE`, ce qui reposait sur une
+    // discipline : penser à incrémenter la version avant chaque flash. Modifier la page
+    // sans le faire aurait figé le cache de tous les navigateurs — ils auraient reçu
+    // « non modifié » indéfiniment, et un rechargement ordinaire n'y aurait rien changé.
+    // C'était une régression vers l'incident du 02/08/2026, alors que le commentaire
+    // affirmait le contraire (relevé en relecture le 16/08/2026).
+    //
+    // Une empreinte du contenu supprime cette dépendance : elle change dès que la page ou
+    // le script change, que la version ait été incrémentée ou non. Et deux compilations
+    // aux contenus différents obtiennent forcément des étiquettes différentes.
+    let etag_index = etag_du_contenu(INDEX_HTML.as_bytes());
+    let etag_script = etag_du_contenu(SCRIPT_JS.as_bytes());
 
     // --- Page principale ---
     // Historique du cache sur cette route : un premier correctif (02/08/2026) avait mis
@@ -142,7 +182,6 @@ pub fn demarrer(
     // navigateur garde sa copie et se contente de demander « a-t-elle changé ? ». Réponse
     // de ~200 octets tant que la version du firmware est la même, contenu complet sinon.
     // On supprime le gros transfert périodique **sans** risquer la page périmée.
-    let etag_index = etag.clone();
     server.fn_handler(
         "/",
         esp_idf_svc::http::Method::Get,
@@ -153,7 +192,6 @@ pub fn demarrer(
 
     // --- Script JavaScript ---
     // Même traitement que la page : 37 Ko qui ne changent qu'au reflash.
-    let etag_script = etag.clone();
     server.fn_handler(
         "/script.js",
         esp_idf_svc::http::Method::Get,
