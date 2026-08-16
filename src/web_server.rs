@@ -50,7 +50,23 @@ pub fn demarrer(
     etat: EtatPartage,
     journal: Arc<Mutex<Journal>>,
 ) -> anyhow::Result<EspHttpServer<'static>> {
-    let mut server = EspHttpServer::new(&HttpConfig::default())?;
+    // `max_open_sockets` : nombre de connexions clients simultanées. La valeur par
+    // défaut d'`esp-idf-svc` est 4, nettement plus restrictive que celle d'ESP-IDF
+    // lui-même, qui utilise 7. Or un navigateur ouvre jusqu'à 6 connexions en
+    // parallèle vers un même serveur : à l'ouverture du dashboard il réclame d'un
+    // coup la page (~42 Ko), le script (~37 Ko) et l'icône. Avec deux appareils, les
+    // 4 places étaient saturées et l'acceptation des connexions bloquait — mesuré le
+    // 08/08/2026 : 7,04 s rien que pour établir la connexion sur `/script.js`, au
+    // moment même où `/sensors` se connectait en 6 ms (donc pas un souci radio).
+    //
+    // Le serveur réserve 3 sockets pour son usage interne (écoute, contrôle,
+    // messages) : il faut donc `CONFIG_LWIP_MAX_SOCKETS >= max_open_sockets + 3`,
+    // porté à 16 dans `sdkconfig.defaults` pour laisser de la marge à NTP, Adafruit
+    // IO et la sonde de `surveillance_reseau.rs`.
+    let mut server = EspHttpServer::new(&HttpConfig {
+        max_open_sockets: 7,
+        ..Default::default()
+    })?;
 
     // --- Page principale ---
     // Historique : un premier correctif (02/08/2026) avait mis `Cache-Control: no-store`

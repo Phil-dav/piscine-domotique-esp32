@@ -17,3 +17,51 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=4096
 # ce réglage, un gel de plus de 5 s (TIMEOUT_S) déclenche un panic -> redémarrage
 # diagnostiqué (voir la boucle principale, `watchdog.feed()` appelé à chaque tour).
 CONFIG_ESP_TASK_WDT_PANIC=y
+
+# Nombre total de sockets disponibles pour TOUT le programme (défaut ESP-IDF : 10).
+# Budget en pointe avec l'ancienne valeur : 7 pour le seul serveur web (4 clients
+# + 3 réservés en interne pour l'écoute, le contrôle et les messages), plus 1 pour
+# la synchro NTP, 1 pour l'envoi Adafruit IO et 1 pour la sonde de joignabilité —
+# soit 10 sur 10, pile au plafond, sans aucune marge.
+# Porté à 16 pour permettre de passer le serveur web à 7 connexions clients
+# (`max_open_sockets` dans `web_server.rs`, contrainte imposée par ESP-IDF :
+# CONFIG_LWIP_MAX_SOCKETS >= max_open_sockets + 3) tout en gardant de la réserve.
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# Agrégation 802.11 en réception (Block ACK / AMPDU) — désactivée le 09/08/2026.
+#
+# Constat : avec la Livebox, la session d'agrégation est détruite et reconstruite en
+# permanence. Mesuré sur 4 min de journal série : 38 cycles `<ba-del>`/`<ba-add>`, soit
+# un toutes les 6,6 s, dont 10 destructions envoyées par la box elle-même
+# (`[ADDBA]RX DELBA, reason:39` = expiration). Une liaison saine établit cette session
+# une fois et la garde des heures.
+#
+# À chaque destruction, les trames en vol sont perdues. Corrélation relevée : le seul
+# sondage dégradé de la période (2 paquets reçus sur 4) tombe exactement entre deux
+# destructions. C'est la meilleure explication trouvée aux pertes par bouffées, aux
+# transferts de 40 Ko qui calent, et aux épisodes d'injoignabilité malgré un signal
+# excellent (-63 dBm).
+#
+# Coût : le débit crête théorique baisse nettement. Sans importance ici — la page fait
+# 42 Ko, soit quelques dizaines de millisecondes d'antenne. La stabilité prime.
+#
+# Test A/B objectif pour valider : compter les `ba-del` sur 4 min de journal, avant et
+# après. 38 -> 0 attendu.
+CONFIG_ESP_WIFI_AMPDU_RX_ENABLED=n
+
+# Boucle principale sur le second cœur — ajouté le 16/08/2026.
+#
+# Par défaut, `app_main` est épinglé sur le cœur 0 (CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0),
+# c'est-à-dire le même cœur que le pilote Wi-Fi (`wifi driver task: ... core=0` au
+# démarrage). Or la boucle principale coupe les interruptions à chaque lecture de la sonde
+# d'eau (`interrupt::free` dans `src/ds18b20.rs`, indispensable au minutage 1-Wire à la
+# microseconde) : elle aveuglait donc le Wi-Fi plusieurs millisecondes, plusieurs fois par
+# cycle de lecture.
+#
+# `interrupt::free` ne coupe que le cœur sur lequel il s'exécute, et chaque cœur de l'ESP32
+# a son propre contrôleur d'interruptions. En déplaçant la boucle sur le cœur 1, le 1-Wire
+# conserve sa protection intégrale sans plus jamais gêner le réseau.
+#
+# Vérification au démarrage : le journal doit afficher `main_task: Started on CPU1`
+# (auparavant CPU0), et `wifi driver task` doit rester sur core=0.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y

@@ -48,6 +48,10 @@ use std::time::{Duration, Instant};
 
 const CLE_BOOST_MIN: &str = "boost_min";
 const CLE_DERNIER_HORODATAGE: &str = "dernier_ts";
+/// Horodatage (epoch UTC) du dernier redémarrage déclenché par le chien de garde
+/// réseau. Persisté pour que le garde-fou anti-boucle survive au redémarrage qu'il
+/// limite — en RAM, il serait remis à zéro à chaque fois et ne servirait à rien.
+const CLE_DERNIER_REBOOT_AUTO: &str = "reboot_auto_ts";
 /// En dessous de ce seuil, un redémarrage juste après une coupure d'alimentation
 /// (POWERON/BROWNOUT) ressemble à une micro-coupure secteur plutôt qu'à un arrêt
 /// volontaire prolongé — seuil choisi par l'utilisateur, ajustable ici si besoin.
@@ -292,9 +296,11 @@ fn main() -> anyhow::Result<()> {
     let mut derniere_humidite: Option<f32> = None;
 
     // AHT10 : bloque ~80 ms à chaque lecture (temps de mesure du capteur). On ne
-    // l'interroge donc que toutes les 2 s au lieu de chaque tick, pour ne pas ralentir
-    // la réactivité du bouton écran.
-    const INTERVALLE_AHT10: Duration = Duration::from_secs(2);
+    // l'interroge donc pas à chaque tick, pour ne pas ralentir la réactivité du bouton
+    // écran. Porté de 2 s à 10 s le 16/08/2026, en même temps que la sonde d'eau : la
+    // température et l'humidité de l'air ne varient pas de façon perceptible en 2 s, et
+    // ces 80 ms rendus à la boucle profitent au reste (bouton, GPS, pilotage pompe).
+    const INTERVALLE_AHT10: Duration = Duration::from_secs(10);
     let mut dernier_aht10 = Instant::now() - INTERVALLE_AHT10;
 
     let mut sonde_eau = ds18b20::SondeEau::nouveau();
@@ -396,34 +402,18 @@ fn main() -> anyhow::Result<()> {
     const INTERVALLE_LOG: Duration = Duration::from_secs(2);
     let mut dernier_log = Instant::now() - INTERVALLE_LOG;
 
-    // Reconnexion Wi-Fi : vérifiée toutes les 30 s, comme le projet C++ de référence.
-    // `connect()` sur l'objet Wi-Fi non bloquant (via `wifi_mut()`) se contente de
-    // déclencher la tentative (`esp_wifi_connect`) et revient tout de suite — la
-    // connexion réelle se fait en tâche de fond, sans jamais geler la boucle principale.
-    const INTERVALLE_WIFI: Duration = Duration::from_secs(30);
-    let mut dernier_controle_wifi = Instant::now();
-    // Si la reconnexion "douce" (`connect()`) échoue ce nombre de fois de suite sans
-    // jamais réussir (10 x 30 s = 5 min), la puce Wi-Fi est probablement restée bloquée
-    // dans un état dont un simple `connect()` ne peut pas la sortir (observé le
-    // 01/08/2026 : réseau sain sur d'autres appareils, mais la carte est restée
-    // injoignable près de 3 h sans jamais se reconnecter seule). On passe alors à un
-    // arrêt/relance complet du pilote Wi-Fi, plus radical mais toujours rapide (pas
-    // d'attente de négociation complète, donc pas de risque pour le Task Watchdog).
-    const ECHECS_AVANT_RESET_PILOTE: u32 = 10;
-    let mut echecs_reconnexion_consecutifs: u32 = 0;
-
-    // « Zombie Wi-Fi » : associé au point d'accès, IP valide, mais plus aucun paquet
-    // ne circule (incident du 08/08/2026, voir `surveillance_reseau.rs`). Le bloc de
-    // reconnexion ci-dessus ne peut rien : il ne s'exécute que si l'association est
-    // perdue, ce qui n'est justement pas le cas ici. Seule la sonde active détecte
-    // cet état, et l'escalade se fait en deux temps.
-    const SANS_JOIGNABILITE_AVANT_RESET: Duration = Duration::from_secs(5 * 60);
-    // Dernier recours si même le reset du pilote ne rétablit rien : redémarrage complet,
-    // exactement le geste qui a rétabli le service manuellement le 08/08/2026. La pompe
-    // est coupée le temps du redémarrage (~8 s) puis repilotée normalement — les compteurs
-    // du jour et la timeline sont en NVS, ils survivent au redémarrage.
-    const SANS_JOIGNABILITE_AVANT_REBOOT: Duration = Duration::from_secs(15 * 60);
-    let mut dernier_reset_zombie = Instant::now();
+    // --- Supervision réseau ---
+    // Une seule machine à états (voir `surveillance_reseau.rs`) remplace les deux
+    // mécanismes concurrents d'avant le 16/08/2026 : la reconnexion sur perte
+    // d'association, et le chien de garde « zombie » sur taux de perte. Ils avaient des
+    // compteurs indépendants, ce qui a coûté 1 h 30 de récupération lors de l'incident de
+    // cette nuit-là au lieu des 25 minutes prévues. Le superviseur décide, la boucle agit.
+    let mut superviseur_reseau = surveillance_reseau::Superviseur::nouveau();
+    // Intervalle minimal entre deux redémarrages automatiques. Sans ce garde-fou, une
+    // perturbation extérieure durable (interférence, box en panne) ferait redémarrer la
+    // carte en boucle. Persisté en NVS, sinon le compteur serait remis à zéro par le
+    // redémarrage qu'il est censé limiter.
+    const INTERVALLE_MIN_REBOOT_AUTO: i64 = 60 * 60;
 
     // Envoi périodique des mesures vers Adafruit IO (cloud gratuit) : toutes les 5
     // minutes suffit largement (l'eau/l'air ne varient pas vite).
@@ -1076,21 +1066,28 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Reconnexion Wi-Fi automatique si la connexion a été perdue (coupure routeur,
-        // portée...) — auparavant, une perte de Wi-Fi était définitive jusqu'au reboot.
-        // Absente si le Wi-Fi est désactivé (`config::WIFI_ACTIF = false`, test temporaire).
-        if wifi_connecte {
-            echecs_reconnexion_consecutifs = 0;
-        } else if let Some(w) = wifi.as_mut() {
-            if maintenant.duration_since(dernier_controle_wifi) >= INTERVALLE_WIFI {
-                dernier_controle_wifi = maintenant;
-                echecs_reconnexion_consecutifs += 1;
+        // --- Supervision réseau : une seule machine à états ---
+        // Le superviseur (voir `surveillance_reseau.rs`) décide, on exécute ici. Il traite
+        // d'un seul tenant la perte d'association et la liaison « associée mais morte »,
+        // qui faisaient auparavant l'objet de deux mécanismes concurrents aux compteurs
+        // indépendants — d'où les 1 h 30 de récupération constatées le 16/08/2026.
+        match superviseur_reseau.evaluer(wifi_connecte, sonde_reseau.as_ref(), maintenant) {
+            surveillance_reseau::Action::Rien => {}
 
-                if echecs_reconnexion_consecutifs >= ECHECS_AVANT_RESET_PILOTE {
-                    warn!(
-                        "Wi-Fi : {} échecs de reconnexion consécutifs, réinitialisation complète du pilote...",
-                        echecs_reconnexion_consecutifs
-                    );
+            surveillance_reseau::Action::Reconnecter { minutes } => {
+                warn!("Réseau indisponible depuis {minutes} min : tentative de reconnexion.");
+                if let Some(w) = wifi.as_mut() {
+                    if let Err(e) = w.wifi_mut().connect() {
+                        warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
+                    }
+                }
+            }
+
+            surveillance_reseau::Action::ReinitialiserPilote { minutes, perte } => {
+                warn!(
+                    "Réseau indisponible depuis {minutes} min ({perte} % de perte) : réinitialisation du pilote Wi-Fi."
+                );
+                if let Some(w) = wifi.as_mut() {
                     if let Err(e) = w.wifi_mut().stop() {
                         warn!("Wi-Fi : échec de l'arrêt du pilote : {:?}", e);
                     }
@@ -1098,67 +1095,44 @@ fn main() -> anyhow::Result<()> {
                         warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
                     }
                     wifi::desactiver_economie_energie();
-                    echecs_reconnexion_consecutifs = 0;
-                } else {
-                    warn!(
-                        "Wi-Fi déconnecté, tentative de reconnexion... ({}/{})",
-                        echecs_reconnexion_consecutifs, ECHECS_AVANT_RESET_PILOTE
-                    );
-                }
-
-                if let Err(e) = w.wifi_mut().connect() {
-                    warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
+                    if let Err(e) = w.wifi_mut().connect() {
+                        warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
+                    }
                 }
             }
-        }
 
-        // --- Chien de garde « zombie Wi-Fi » ---
-        // Associé, IP valide, et pourtant plus rien ne circule. Le bloc de reconnexion
-        // ci-dessus est inopérant dans ce cas : il ne s'exécute que si l'association est
-        // perdue, ce qui n'est justement pas le cas. Seule la sonde active le détecte.
-        //
-        // Garde-fou essentiel : tant que la sonde n'a JAMAIS réussi un seul ping depuis
-        // le démarrage (`None`), on ne fait rien du tout. Une passerelle qui ignore
-        // l'ICMP ne doit surtout pas provoquer des redémarrages en boucle.
-        if wifi_connecte {
-            if let Some(depuis) = sonde_reseau
-                .as_ref()
-                .and_then(|s| s.depuis_dernier_succes())
-            {
-                let minutes = depuis.as_secs() / 60;
-                if depuis >= SANS_JOIGNABILITE_AVANT_REBOOT {
+            surveillance_reseau::Action::Redemarrer { minutes, perte } => {
+                // Le redémarrage complet n'est autorisé qu'une fois par heure. La date du
+                // dernier est relue en NVS plutôt que gardée en RAM : elle doit survivre au
+                // redémarrage qu'elle est censée limiter.
+                let epoch_maintenant = heure_utc.map(|u| u.and_utc().timestamp());
+                let dernier_reboot = stockage.lire_u32(CLE_DERNIER_REBOOT_AUTO, 0) as i64;
+                let reboot_autorise = match epoch_maintenant {
+                    // Sans horloge (ni GPS ni NTP), on ne peut pas appliquer la limite
+                    // horaire. On autorise quand même : refuser reviendrait à désactiver le
+                    // filet de sécurité au moment où il est le plus utile.
+                    None => true,
+                    Some(t) => {
+                        dernier_reboot == 0 || t - dernier_reboot >= INTERVALLE_MIN_REBOOT_AUTO
+                    }
+                };
+
+                if reboot_autorise {
                     warn!(
-                        "Réseau injoignable depuis {minutes} min malgré une association Wi-Fi valide : redémarrage complet."
+                        "Réseau indisponible depuis {minutes} min ({perte} % de perte) : redémarrage complet."
                     );
+                    if let Some(t) = epoch_maintenant {
+                        stockage.ecrire_u32(CLE_DERNIER_REBOOT_AUTO, t as u32);
+                    }
                     journal.lock().enregistrer_alerte(
                         date_texte.as_deref().unwrap_or("--/--/----"),
                         heure_texte.as_deref().unwrap_or("--:--:--"),
                         "RESEAU_ZOMBIE",
-                        &format!("injoignable {minutes} min, redemarrage"),
+                        &format!("{perte}% de perte pendant {minutes} min, redemarrage"),
                     );
-                    // Laisse le temps à l'écriture NVS du journal de se terminer.
+                    // Laisse le temps aux écritures NVS de se terminer.
                     FreeRtos::delay_ms(200);
                     unsafe { esp_idf_svc::sys::esp_restart() };
-                } else if depuis >= SANS_JOIGNABILITE_AVANT_RESET
-                    && maintenant.duration_since(dernier_reset_zombie)
-                        >= SANS_JOIGNABILITE_AVANT_RESET
-                {
-                    dernier_reset_zombie = maintenant;
-                    warn!(
-                        "Réseau injoignable depuis {minutes} min : réinitialisation du pilote Wi-Fi."
-                    );
-                    if let Some(w) = wifi.as_mut() {
-                        if let Err(e) = w.wifi_mut().stop() {
-                            warn!("Wi-Fi : échec de l'arrêt du pilote : {:?}", e);
-                        }
-                        if let Err(e) = w.wifi_mut().start() {
-                            warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
-                        }
-                        wifi::desactiver_economie_energie();
-                        if let Err(e) = w.wifi_mut().connect() {
-                            warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
-                        }
-                    }
                 }
             }
         }

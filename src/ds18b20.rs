@@ -10,14 +10,22 @@ use std::time::{Duration, Instant};
 /// pas geler le reste de la boucle (bouton, etc.) pendant ~750 ms.
 const DUREE_CONVERSION: Duration = Duration::from_millis(750);
 /// Pas besoin de redemander une conversion en continu.
-const INTERVALLE_LECTURE: Duration = Duration::from_secs(2);
+///
+/// Porté de 2 s à 10 s le 16/08/2026. Chaque lecture ouvre deux fenêtres `interrupt::free`
+/// (déclenchement puis lecture) : espacer divise par 5 le nombre de ces coupures, et donc
+/// la gêne infligée au Wi-Fi. Sans perte d'information — une eau de piscine varie de
+/// quelques centièmes de degré par heure, 10 s reste six fois par minute.
+const INTERVALLE_LECTURE: Duration = Duration::from_secs(10);
 /// Échecs de lecture consécutifs avant d'oublier l'adresse mémorisée et de forcer une
 /// redécouverte complète du bus (précédée d'une impulsion de reset) : c'est la relance
 /// automatique de la sonde, sans intervention manuelle.
 const ECHECS_AVANT_REDECOUVERTE: u32 = 5;
 /// Au-delà de ce délai sans aucune lecture valide, la sonde est signalée comme muette
-/// (alerte journalisée + affichage au dashboard). La sonde étant lue toutes les 2 s,
-/// ce délai représente ~150 tentatives échouées : c'est un vrai décrochage, pas du bruit.
+/// (alerte journalisée + affichage au dashboard). Depuis le passage de l'intervalle de
+/// lecture à 10 s (16/08/2026), ce délai représente une trentaine de tentatives échouées —
+/// contre ~150 auparavant. C'est toujours un vrai décrochage et non du bruit, et le seuil
+/// reste volontairement à 5 minutes : c'est une durée d'absence de mesure qui compte ici,
+/// pas un nombre d'essais.
 const DELAI_SONDE_MUETTE: Duration = Duration::from_secs(300);
 
 enum Etat {
