@@ -1,7 +1,9 @@
 use parking_lot::Mutex;
 use std::sync::Arc;
 
-use esp_idf_svc::http::server::{Configuration as HttpConfig, EspHttpServer};
+use esp_idf_svc::http::server::{
+    Configuration as HttpConfig, EspHttpConnection, EspHttpServer, Request,
+};
 use esp_idf_svc::io::{EspIOError, Write as EspWrite};
 use log::info;
 
@@ -31,6 +33,59 @@ const SCRIPT_JS: &str = if crate::config::DASHBOARD_SIMPLIFIE {
 /// vraie image ici, avec un cache long, répond plus vite et libère cette connexion
 /// pour les ressources qui comptent vraiment (page, script, données).
 const FAVICON: &[u8] = include_bytes!("favicon.png");
+
+/// Sert un contenu figé (la page, le script, l'icône) en évitant de le retransmettre
+/// quand le navigateur l'a déjà.
+///
+/// ## Le problème
+///
+/// La page fait 42 Ko et le script 37 Ko. Ils ne changent **qu'au reflashage**, mais
+/// étaient jusqu'ici marqués `max-age=30` : passé trente secondes, le navigateur jetait sa
+/// copie et redemandait les 80 Ko. Or ces gros transferts sont précisément ce qui échoue
+/// quand la liaison perd des paquets — mesuré le 15/08/2026 : `/sensors` (1,3 Ko) passait
+/// sans problème pendant que la page complète était coupée à 20 s.
+///
+/// ## Le mécanisme retenu — revalidation par `ETag`
+///
+/// On envoie une étiquette de version (`ETag`) avec le contenu, et `no-cache`, qui ne veut
+/// pas dire « ne cache pas » mais « garde une copie, et demande-moi avant de t'en servir ».
+///
+/// Au chargement suivant, le navigateur renvoie cette étiquette dans `If-None-Match`. Si
+/// elle correspond, on répond **304 Non modifié** sans aucun corps : environ 200 octets au
+/// lieu de 42 Ko. Sinon on renvoie le contenu complet.
+///
+/// ## Pourquoi pas simplement un cache long
+///
+/// Un `max-age` d'un an supprimerait complètement le transfert, mais le navigateur
+/// continuerait d'afficher l'ancienne page après un reflashage — exactement l'incident du
+/// 02/08/2026, où des données figées ne se débloquaient qu'avec un rechargement forcé. La
+/// contourner demanderait un numéro de version dans chaque adresse, à maintenir à la main.
+///
+/// Ici l'étiquette **est** la version du firmware : elle change toute seule à chaque flash,
+/// et le navigateur retélécharge automatiquement. Impossible de servir une page périmée.
+fn servir_contenu_fige(
+    req: Request<&mut EspHttpConnection<'_>>,
+    etag: &str,
+    type_contenu: &str,
+    corps: &[u8],
+) -> Result<(), EspIOError> {
+    if req.header("If-None-Match") == Some(etag) {
+        req.into_status_response(304)?;
+        return Ok(());
+    }
+
+    let mut resp = req.into_response(
+        200,
+        None,
+        &[
+            ("Content-Type", type_contenu),
+            ("Cache-Control", "no-cache"),
+            ("ETag", etag),
+        ],
+    )?;
+    resp.write_all(corps)?;
+    Ok(())
+}
 
 /// Extrait la valeur d'un paramètre de requête simple (`?a=1&b=2`), sans décodage URL
 /// (les valeurs utilisées ici — nombres, mots-clés — n'en ont pas besoin).
@@ -68,50 +123,47 @@ pub fn demarrer(
         ..Default::default()
     })?;
 
+    // Étiquette de version servant d'`ETag` aux contenus figés (page, script, icône).
+    // Construite une seule fois au démarrage, pas à chaque requête. Elle change à chaque
+    // flash puisqu'elle reprend `VERSION_FIRMWARE` : le navigateur retélécharge donc
+    // automatiquement après une mise à jour, sans qu'on ait rien à maintenir.
+    // Les guillemets font partie de la syntaxe d'un ETag HTTP.
+    let etag = format!("\"{}\"", crate::config::VERSION_FIRMWARE);
+
     // --- Page principale ---
-    // Historique : un premier correctif (02/08/2026) avait mis `Cache-Control: no-store`
-    // sur les trois routes (/, /script.js, /sensors) pour éviter qu'un navigateur ne
-    // garde indéfiniment une page périmée après un simple rechargement. Mais / et
-    // /script.js sont volumineux (toute la page HTML/CSS), et forcer leur retransmission
-    // complète à chaque chargement a révélé une fragilité du petit serveur web de
-    // l'ESP32 sur les envois volumineux (`httpd_sock_err: error in send : 11`,
-    // observé le 02/08/2026 — page vide/bloquée côté navigateur). Compromis retenu :
-    // `max-age=30` sur / et /script.js (contenu qui ne change qu'au reflash — 30 s de
-    // décalage maximum est largement acceptable, et évite de retransmettre inutilement
-    // une grosse page à chaque rechargement). `/sensors` (petit, interrogé toutes les
-    // 2 s) garde `no-store`, c'est là que la fraîcheur compte réellement.
+    // Historique du cache sur cette route : un premier correctif (02/08/2026) avait mis
+    // `no-store` partout pour éviter qu'un navigateur ne garde une page périmée après un
+    // reflash. Mais forcer la retransmission complète des 42 Ko à chaque chargement a
+    // révélé une fragilité du serveur web de l'ESP32 sur les gros envois
+    // (`httpd_sock_err: error in send : 11`, page vide côté navigateur). Compromis
+    // intermédiaire : `max-age=30`, qui retransmettait quand même tout toutes les 30 s.
+    //
+    // Depuis le 16/08/2026, revalidation par `ETag` (voir `servir_contenu_fige`) : le
+    // navigateur garde sa copie et se contente de demander « a-t-elle changé ? ». Réponse
+    // de ~200 octets tant que la version du firmware est la même, contenu complet sinon.
+    // On supprime le gros transfert périodique **sans** risquer la page périmée.
+    let etag_index = etag.clone();
     server.fn_handler(
         "/",
         esp_idf_svc::http::Method::Get,
-        |req| -> Result<(), EspIOError> {
-            let mut resp = req.into_response(
-                200,
-                None,
-                &[
-                    ("Content-Type", "text/html"),
-                    ("Cache-Control", "max-age=30"),
-                ],
-            )?;
-            resp.write_all(INDEX_HTML.as_bytes())?;
-            Ok(())
+        move |req| -> Result<(), EspIOError> {
+            servir_contenu_fige(req, &etag_index, "text/html", INDEX_HTML.as_bytes())
         },
     )?;
 
     // --- Script JavaScript ---
+    // Même traitement que la page : 37 Ko qui ne changent qu'au reflash.
+    let etag_script = etag.clone();
     server.fn_handler(
         "/script.js",
         esp_idf_svc::http::Method::Get,
-        |req| -> Result<(), EspIOError> {
-            let mut resp = req.into_response(
-                200,
-                None,
-                &[
-                    ("Content-Type", "application/javascript"),
-                    ("Cache-Control", "max-age=30"),
-                ],
-            )?;
-            resp.write_all(SCRIPT_JS.as_bytes())?;
-            Ok(())
+        move |req| -> Result<(), EspIOError> {
+            servir_contenu_fige(
+                req,
+                &etag_script,
+                "application/javascript",
+                SCRIPT_JS.as_bytes(),
+            )
         },
     )?;
 
