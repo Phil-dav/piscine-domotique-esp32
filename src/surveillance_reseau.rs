@@ -183,6 +183,13 @@ const SEUIL_TAUX_REUSSITE: f32 = 0.40;
 /// pendant 1 h 30 : un retour de quelques secondes suffisait à tout annuler.
 const STABILITE_AVANT_OUBLI: Duration = Duration::from_secs(60);
 
+/// Ancienneté maximale d'un sondage réussi pour considérer la liaison vivante lorsque la
+/// fenêtre glissante n'est pas encore complète (au démarrage, ou après l'avoir vidée).
+///
+/// Deux minutes, soit deux cycles de sondage : assez pour ne pas condamner une liaison qui
+/// vient de se rétablir, trop peu pour laisser passer une liaison réellement morte.
+const SUCCES_RECENT: Duration = Duration::from_secs(120);
+
 const AVANT_RECONNEXION: Duration = Duration::from_secs(30);
 const INTERVALLE_RECONNEXION: Duration = Duration::from_secs(30);
 const AVANT_RESET_PILOTE: Duration = Duration::from_secs(5 * 60);
@@ -273,13 +280,23 @@ impl Superviseur {
         self.etait_connecte = wifi_connecte;
 
         // Utilisabilité. L'association perdue compte immédiatement, sans attendre la
-        // fenêtre — c'est précisément ce qui manquait le 16/08. Une fenêtre incomplète
-        // vaut bénéfice du doute : on ne juge pas sur un ou deux sondages.
+        // fenêtre — c'est précisément ce qui manquait le 16/08.
+        //
+        // Quand la fenêtre est incomplète, on ne peut pas juger sur un taux. La première
+        // version accordait alors le bénéfice du doute, et c'était un piège : après une
+        // réinitialisation du pilote, la réassociation vidait la fenêtre, le réseau était
+        // déclaré utilisable pendant les 10 minutes de remplissage, et le chronomètre
+        // d'indisponibilité était effacé au bout de 60 s. **Le redémarrage à 10 minutes ne
+        // pouvait donc jamais se déclencher** — le défaut même que ce module devait
+        // corriger, simplement déplacé (relevé en relecture le 16/08/2026).
+        //
+        // On s'appuie désormais sur une preuve directe : un sondage a-t-il réussi
+        // récemment ? Si oui, la liaison fonctionne vraiment, quelle que soit la fenêtre.
+        // Si non, elle reste tenue pour inutilisable et le chronomètre continue de courir.
         let (utilisable, perte) = match (wifi_connecte, sonde) {
             (false, _) => (false, 100),
             (true, None) => (true, 0),
             (true, Some(s)) => match s.bilan() {
-                None => (true, 0),
                 Some(bilan) => {
                     let taux = bilan.taux_reussite();
                     (
@@ -287,6 +304,11 @@ impl Superviseur {
                         ((1.0 - taux) * 100.0).round() as u32,
                     )
                 }
+                None => (
+                    s.depuis_dernier_succes()
+                        .is_some_and(|depuis| depuis <= SUCCES_RECENT),
+                    100,
+                ),
             },
         };
 

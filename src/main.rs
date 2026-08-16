@@ -484,12 +484,23 @@ fn main() -> anyhow::Result<()> {
             donnees.demande_rearmement_moteur = false;
             demande
         };
-        if demande_reset {
-            securite_moteur.rearmer();
-            info!("Défaut moteur réarmé manuellement");
-        }
-
+        // L'entrée est lue AVANT d'appliquer un éventuel réarmement, et le réarmement est
+        // refusé si le défaut est toujours physiquement présent.
+        //
+        // Auparavant `rearmer()` s'exécutait en premier : il remet l'anti-rebond à zéro,
+        // si bien que pendant les 200 ms suivantes le système considérait qu'il n'y avait
+        // plus de défaut — et commandait la pompe — alors que le disjoncteur était encore
+        // déclenché. Le moteur ne démarrait pas réellement (son circuit de puissance est
+        // ouvert), mais la logique affirmait le contraire de la réalité.
         let defaut_brut = pcf8574::lire_defaut_moteur(&i2c_partage).unwrap_or(false);
+        if demande_reset {
+            if defaut_brut {
+                warn!("Réarmement refusé : le défaut moteur est toujours présent");
+            } else {
+                securite_moteur.rearmer();
+                info!("Défaut moteur réarmé manuellement");
+            }
+        }
         securite_moteur.mettre_a_jour(defaut_brut);
 
         // Bouton écran (P4) : appui court = page suivante, appui long (≥ 0,8 s) = retour
@@ -843,8 +854,16 @@ fn main() -> anyhow::Result<()> {
                         // ~750 ms, non bloquante), `heures_cibles` vaut alors 0.0 par défaut
                         // et `0.0 >= 0.0` armerait le verrou dès le premier tour de boucle,
                         // bloquant la filtration pour toute la journée.
-                        let objectif_connu =
-                            derniere_temperature_eau.is_some() && heures_cibles > 0.0;
+                        //
+                        // `!sonde_muette` ajouté le 16/08/2026 : `derniere_temperature_eau`
+                        // conserve la dernière valeur valide et n'est jamais remise à
+                        // `None`. Sans cette condition, `is_some()` restait vrai
+                        // indéfiniment après la mort de la sonde, et la filtration AUTO
+                        // continuait sur une température figée — exactement ce que le
+                        // commentaire ci-dessous prétendait empêcher, sans le faire.
+                        let objectif_connu = derniere_temperature_eau.is_some()
+                            && !sonde_muette
+                            && heures_cibles > 0.0;
                         if objectif_connu && pompe.heures_aujourdhui() >= heures_cibles {
                             filtration_terminee_aujourdhui = true;
                         }
