@@ -399,8 +399,22 @@ fn main() -> anyhow::Result<()> {
     let mut dernier_dessin = Instant::now() - INTERVALLE_DESSIN;
 
     // Le journal série n'a pas besoin d'être mis à jour à chaque tick.
-    const INTERVALLE_LOG: Duration = Duration::from_secs(2);
+    //
+    // Porté de 2 s à 10 s le 16/08/2026. Mesure faite sur une capture de 4 h 40 : la ligne
+    // d'état représentait 8382 lignes sur 8847, soit 95 % du fichier et ~13 Mo par jour.
+    // Or les capteurs ne sont relus que toutes les 10 s (voir `INTERVALLE_AHT10` et
+    // `ds18b20::INTERVALLE_LECTURE`) : quatre lignes sur cinq recopiaient donc des valeurs
+    // rigoureusement identiques. Le coût pour la carte était négligeable — 1,3 % du débit
+    // série — mais un journal illisible ne sert à rien, et c'est justement ce qui avait
+    // laissé passer inaperçue une valeur figée pendant des semaines.
+    const INTERVALLE_LOG: Duration = Duration::from_secs(10);
     let mut dernier_log = Instant::now() - INTERVALLE_LOG;
+
+    // À 10 s d'intervalle, l'instant exact d'une transition serait perdu. On journalise
+    // donc aussi, immédiatement, dès qu'un état discret change — même principe périodique
+    // + événementiel que pour les envois vers Adafruit IO. Ce sont les seules grandeurs
+    // dont la date compte à la seconde près ; les températures, elles, dérivent lentement.
+    let mut etats_precedents: Option<(bool, bool, bool, bool, bool)> = None;
 
     // --- Supervision réseau ---
     // Une seule machine à états (voir `surveillance_reseau.rs`) remplace les deux
@@ -1096,9 +1110,7 @@ fn main() -> anyhow::Result<()> {
             surveillance_reseau::Action::Reconnecter { minutes } => {
                 warn!("Réseau indisponible depuis {minutes} min : tentative de reconnexion.");
                 if let Some(w) = wifi.as_mut() {
-                    if let Err(e) = w.wifi_mut().connect() {
-                        warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
-                    }
+                    wifi::forcer_reconnexion(w);
                 }
             }
 
@@ -1114,9 +1126,7 @@ fn main() -> anyhow::Result<()> {
                         warn!("Wi-Fi : échec du redémarrage du pilote : {:?}", e);
                     }
                     wifi::desactiver_economie_energie();
-                    if let Err(e) = w.wifi_mut().connect() {
-                        warn!("Wi-Fi : échec de la demande de reconnexion : {:?}", e);
-                    }
+                    wifi::forcer_reconnexion(w);
                 }
             }
 
@@ -1320,7 +1330,20 @@ fn main() -> anyhow::Result<()> {
             donnees.tension_sortie_5v_v = tension_sortie_5v;
         }
 
-        if dernier_log.elapsed() >= INTERVALLE_LOG {
+        // Un changement d'état discret déclenche une ligne immédiate, sans attendre
+        // l'échéance périodique. `etats_precedents` vaut `None` au tout premier tour :
+        // la première ligne est donc écrite sans délai, comme avant.
+        let etats_courants = (
+            pompe.etat(),
+            niveau_ok,
+            systeme_sur,
+            boost.actif(),
+            wifi_connecte,
+        );
+        let etat_a_change = etats_precedents != Some(etats_courants);
+        etats_precedents = Some(etats_courants);
+
+        if etat_a_change || dernier_log.elapsed() >= INTERVALLE_LOG {
             dernier_log = maintenant;
             // RAM libre (tas) : `libre` = disponible maintenant, `plancher` = le pire
             // niveau jamais atteint depuis le démarrage (utile pour repérer une fuite

@@ -6,8 +6,24 @@ lignes a la connexion, ce qui evite de declencher le circuit auto-reset de la
 carte (condensateurs couples a EN/GPIO0) et de la coincer dans le bootloader
 ROM (voir memoire "piege moniteur serie bootloader" - incident du 28/07/2026).
 
-Utilisation : python moniteur_serie.py [PORT] [VITESSE]
-Par defaut : port COM4, vitesse 115200 (comme espflash).
+Utilisation : python moniteur_serie.py [PORT] [VITESSE] [DOSSIER_LOGS] [ETIQUETTE]
+Par defaut : port COM4, vitesse 115200 (comme espflash), logs dans C:\\rust\\3\\logs.
+
+Le troisieme argument permet de capturer une autre carte sans melanger les
+journaux : depuis le 16/08/2026 une carte espion Wi-Fi (ESP32 sur COM7) tourne
+en parallele de l'automate piscine, et il faut pouvoir comparer les deux points de
+vue au meme instant. Voir l'alias PowerShell `connect` et sa cible `espion`.
+
+Le quatrieme argument nomme la carte dans le fichier lui-meme :
+
+    log_espion_2026-08-16_15h33_fonctionnement.txt
+
+Les deux captures demarrant a une minute d'intervalle, leurs noms etaient quasi
+identiques et seul le dossier les distinguait. Or des qu'un fichier est copie ou
+ouvert dans un onglet d'editeur, ce contexte disparait. L'etiquette est placee juste
+apres "log_" : comme tous les fichiers d'un meme dossier la partagent, le tri par
+nom reste chronologique.
+
 Ctrl+C pour quitter.
 """
 
@@ -21,21 +37,26 @@ PORT_PAR_DEFAUT = "COM4"
 VITESSE_PAR_DEFAUT = 115200
 # Dossier fixe, peu importe d'où `connect` est lancé (voir memoire "piege
 # moniteur serie bootloader" et les echanges du 29/07/2026) - cree si absent.
-DOSSIER_LOGS = Path(r"C:\rust\3\logs")
+DOSSIER_LOGS_PAR_DEFAUT = Path(r"C:\rust\3\logs")
 
 
 def main() -> None:
     port = sys.argv[1] if len(sys.argv) > 1 else PORT_PAR_DEFAUT
     vitesse = int(sys.argv[2]) if len(sys.argv) > 2 else VITESSE_PAR_DEFAUT
+    dossier_logs = Path(sys.argv[3]) if len(sys.argv) > 3 else DOSSIER_LOGS_PAR_DEFAUT
+    etiquette = sys.argv[4] if len(sys.argv) > 4 else ""
 
     reponse = input("Enregistrer aussi dans un fichier ? (o/N) : ").strip().lower()
     fichier_fonctionnement = None
     fichier_defauts = None
     if reponse in ("o", "oui", "y", "yes"):
-        DOSSIER_LOGS.mkdir(parents=True, exist_ok=True)
-        base = datetime.now().strftime("log_%Y-%m-%d_%Hh%M")
-        chemin_fonctionnement = DOSSIER_LOGS / f"{base}_fonctionnement.txt"
-        chemin_defauts = DOSSIER_LOGS / f"{base}_defauts.txt"
+        dossier_logs.mkdir(parents=True, exist_ok=True)
+        # Sans etiquette, on garde exactement l'ancien nommage : les captures ad hoc
+        # (`connect COM5`) ne changent pas de forme.
+        prefixe = "log_%s_" % etiquette if etiquette else "log_"
+        base = datetime.now().strftime(prefixe + "%Y-%m-%d_%Hh%M")
+        chemin_fonctionnement = dossier_logs / f"{base}_fonctionnement.txt"
+        chemin_defauts = dossier_logs / f"{base}_defauts.txt"
         fichier_fonctionnement = open(chemin_fonctionnement, "w", encoding="utf-8")
         fichier_defauts = open(chemin_defauts, "w", encoding="utf-8")
         print(f"Enregistrement dans {chemin_fonctionnement} et {chemin_defauts}")

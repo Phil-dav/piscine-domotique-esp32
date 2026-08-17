@@ -35,6 +35,48 @@ pub fn desactiver_economie_energie() {
     }
 }
 
+/// Force une reconnexion en repartant de zéro : `disconnect()` **puis** `connect()`.
+///
+/// # Pourquoi la déconnexion préalable est indispensable
+///
+/// Un `connect()` seul ne fait rien du tout quand le pilote se croit déjà associé. Il
+/// écrit un avertissement dans son propre journal et **renvoie un succès** :
+///
+/// ```text
+/// W wifi:sta is connected, disconnect before connecting to new ap
+/// ```
+///
+/// Or c'est précisément la situation dans laquelle on se trouve quand on cherche à
+/// reconnecter. La capture du 16/08/2026 est sans appel : **44 tentatives, 0 exécutée.**
+/// Trente-six ont renvoyé un succès sans rien faire, huit ont échoué en
+/// `ESP_ERR_WIFI_CONN`. Le mécanisme de récupération tapait dans le vide depuis sa
+/// création.
+///
+/// L'espion Wi-Fi (`c:\rust\5`) a montré l'autre versant de la scène au même instant :
+/// la box émettait des déauthentifications de **raison 7** — « trame reçue d'une station
+/// non associée ». Elle avait donc déjà retiré la carte de sa table, pendant que la carte
+/// se croyait toujours associée et continuait d'émettre dans le vide. Aucune des deux ne
+/// pouvait sortir seule de ce désaccord, et rien au-dessus ne fonctionnait : ni ARP, ni
+/// ping, ni DNS.
+///
+/// `disconnect()` oblige la carte à abandonner cette croyance périmée et à tout
+/// reconstruire depuis l'authentification. C'est exactement l'opération que seul
+/// `esp_restart()` accomplissait jusqu'ici — d'où le fait qu'il ait toujours été le seul
+/// remède efficace.
+///
+/// L'échec du `disconnect()` n'est pas traité comme une erreur bloquante : s'il échoue
+/// parce que la carte n'était effectivement pas associée, le `connect()` qui suit est
+/// justement ce qu'il faut faire.
+pub fn forcer_reconnexion(wifi: &mut BlockingWifi<EspWifi<'static>>) {
+    if let Err(e) = wifi.wifi_mut().disconnect() {
+        // Cas normal quand l'association était réellement perdue : on continue.
+        info!("Wi-Fi : déconnexion préalable sans effet ({e:?}), poursuite.");
+    }
+    if let Err(e) = wifi.wifi_mut().connect() {
+        warn!("Wi-Fi : échec de la demande de reconnexion : {e:?}");
+    }
+}
+
 /// Connecte l'ESP32 au réseau Wi-Fi configuré dans config.rs.
 /// Scanne d'abord le réseau pour détecter automatiquement son canal
 /// et son mode d'authentification réel, plutôt que de les deviner.
